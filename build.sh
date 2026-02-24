@@ -49,6 +49,8 @@ swiftc \
   "$ROOT_DIR/DisplayStreamManager.swift" \
   "$ROOT_DIR/PointerMath.swift" \
   "$ROOT_DIR/PointerRouter.swift" \
+  "$ROOT_DIR/InputMacroEngine.swift" \
+  "$ROOT_DIR/WorkspacePreviewWindowController.swift" \
   "$ROOT_DIR/WorkspaceGridView.swift" \
   "$ROOT_DIR/WorkspaceRootViewController.swift"
 

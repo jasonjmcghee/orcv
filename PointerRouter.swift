@@ -30,6 +30,18 @@ final class PointerRouter {
         CGWarpMouseCursorPosition(destination)
     }
 
+    func teleportToDisplay(displayID: CGDirectDisplayID, normalized: CGPoint = CGPoint(x: 0.5, y: 0.5)) {
+        let displayBounds = CGDisplayBounds(displayID)
+        guard let destination = PointerMath.denormalizedPoint(
+            from: normalized,
+            in: displayBounds,
+            destinationYFlipped: true
+        ) else {
+            return
+        }
+        CGWarpMouseCursorPosition(destination)
+    }
+
     private func displayIDs(at point: CGPoint) -> [CGDirectDisplayID] {
         let maxDisplays: UInt32 = 16
         var ids = [CGDirectDisplayID](repeating: 0, count: Int(maxDisplays))

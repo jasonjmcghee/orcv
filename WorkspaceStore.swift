@@ -3,6 +3,7 @@ import Foundation
 final class WorkspaceStore {
     private(set) var workspaces: [Workspace] = []
     private(set) var focusedWorkspaceID: UUID?
+    private(set) var selectedWorkspaceIDs: Set<UUID> = []
 
     var onDidChange: (() -> Void)?
 
@@ -20,6 +21,7 @@ final class WorkspaceStore {
 
         workspaces = mapped.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
         focusedWorkspaceID = workspaces.first?.id
+        selectedWorkspaceIDs = focusedWorkspaceID.map { [$0] } ?? []
         onDidChange?()
     }
 
@@ -30,6 +32,7 @@ final class WorkspaceStore {
         } else {
             focusedWorkspaceID = restored.first?.id
         }
+        selectedWorkspaceIDs = focusedWorkspaceID.map { [$0] } ?? []
         onDidChange?()
     }
 
@@ -45,12 +48,42 @@ final class WorkspaceStore {
             )
         )
         focusedWorkspaceID = workspaces.last?.id
+        selectedWorkspaceIDs = focusedWorkspaceID.map { [$0] } ?? []
         onDidChange?()
     }
 
     func focus(workspaceID: UUID) {
         guard workspaces.contains(where: { $0.id == workspaceID }) else { return }
         focusedWorkspaceID = workspaceID
+        onDidChange?()
+    }
+
+    func selectOnly(workspaceID: UUID) {
+        guard workspaces.contains(where: { $0.id == workspaceID }) else { return }
+        focusedWorkspaceID = workspaceID
+        selectedWorkspaceIDs = [workspaceID]
+        onDidChange?()
+    }
+
+    func toggleSelection(workspaceID: UUID) {
+        guard workspaces.contains(where: { $0.id == workspaceID }) else { return }
+        if selectedWorkspaceIDs.contains(workspaceID) {
+            selectedWorkspaceIDs.remove(workspaceID)
+            if selectedWorkspaceIDs.isEmpty {
+                focusedWorkspaceID = nil
+            } else if focusedWorkspaceID == workspaceID {
+                focusedWorkspaceID = selectedWorkspaceIDs.first
+            }
+        } else {
+            selectedWorkspaceIDs.insert(workspaceID)
+            focusedWorkspaceID = workspaceID
+        }
+        onDidChange?()
+    }
+
+    func clearSelection() {
+        selectedWorkspaceIDs.removeAll()
+        focusedWorkspaceID = nil
         onDidChange?()
     }
 
@@ -122,6 +155,7 @@ final class WorkspaceStore {
 
         let byID = Dictionary(uniqueKeysWithValues: workspaces.map { ($0.id, $0) })
         workspaces = orderedIDs.compactMap { byID[$0] }
+        selectedWorkspaceIDs = selectedWorkspaceIDs.intersection(Set(orderedIDs))
         onDidChange?()
     }
 
@@ -133,6 +167,10 @@ final class WorkspaceStore {
 
         let removed = workspaces.remove(at: index)
         focusedWorkspaceID = workspaces.first?.id
+        selectedWorkspaceIDs.remove(removed.id)
+        if selectedWorkspaceIDs.isEmpty, let focusedWorkspaceID {
+            selectedWorkspaceIDs = [focusedWorkspaceID]
+        }
         onDidChange?()
         return removed
     }
@@ -146,16 +184,26 @@ final class WorkspaceStore {
         return workspace(with: focusedWorkspaceID)
     }
 
+    var selectedWorkspaces: [Workspace] {
+        workspaces.filter { selectedWorkspaceIDs.contains($0.id) }
+    }
+
     func focusNextWorkspace() {
         guard !workspaces.isEmpty else { return }
         guard let currentFocusedID = focusedWorkspaceID,
               let currentIndex = workspaces.firstIndex(where: { $0.id == currentFocusedID }) else {
             focusedWorkspaceID = workspaces.first?.id
+            if let focusedWorkspaceID {
+                selectedWorkspaceIDs = [focusedWorkspaceID]
+            }
             onDidChange?()
             return
         }
         let nextIndex = (currentIndex + 1) % workspaces.count
         focusedWorkspaceID = workspaces[nextIndex].id
+        if selectedWorkspaceIDs.isEmpty, let focusedWorkspaceID {
+            selectedWorkspaceIDs = [focusedWorkspaceID]
+        }
         onDidChange?()
     }
 
@@ -164,11 +212,17 @@ final class WorkspaceStore {
         guard let currentFocusedID = focusedWorkspaceID,
               let currentIndex = workspaces.firstIndex(where: { $0.id == currentFocusedID }) else {
             focusedWorkspaceID = workspaces.first?.id
+            if let focusedWorkspaceID {
+                selectedWorkspaceIDs = [focusedWorkspaceID]
+            }
             onDidChange?()
             return
         }
         let previousIndex = (currentIndex - 1 + workspaces.count) % workspaces.count
         focusedWorkspaceID = workspaces[previousIndex].id
+        if selectedWorkspaceIDs.isEmpty, let focusedWorkspaceID {
+            selectedWorkspaceIDs = [focusedWorkspaceID]
+        }
         onDidChange?()
     }
 

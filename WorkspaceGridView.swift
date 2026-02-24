@@ -19,7 +19,23 @@ final class WorkspaceGridView: NSView {
         }
     }
 
-    var onFocusRequest: ((UUID, CGPoint, CGRect) -> Void)?
+    var selectedWorkspaceIDs: Set<UUID> = [] {
+        didSet {
+            syncTileLayers()
+            needsDisplay = true
+        }
+    }
+
+    var showsDisplayIDs = false {
+        didSet {
+            guard oldValue != showsDisplayIDs else { return }
+            syncTileLayers()
+            needsDisplay = true
+        }
+    }
+
+    var onFocusRequest: ((UUID, CGPoint, CGRect, NSEvent.ModifierFlags) -> Void)?
+    var onBackgroundClick: (() -> Void)?
     var onResizeRequest: ((UUID, CGSize) -> Void)?
     var onReorderCommit: (([UUID]) -> Void)?
     var onSwipeDown: (() -> Void)?
@@ -52,10 +68,11 @@ final class WorkspaceGridView: NSView {
     private let reorderIndicatorLayer = CAShapeLayer()
     private var animateReflowNextSync = false
 
-    private let horizontalPadding: CGFloat = 20.0
-    private let verticalPadding: CGFloat = 20.0
+    private let horizontalPadding: CGFloat = 12.0
+    private let verticalPadding: CGFloat = 12.0
     private let spacing: CGFloat = 8.0
     private let tileCornerRadius: CGFloat = 2.0
+    private let wrapTolerance: CGFloat = 0.5
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -90,7 +107,7 @@ final class WorkspaceGridView: NSView {
             .foregroundColor: NSColor.secondaryLabelColor,
             .paragraphStyle: style,
         ]
-        let text = "No displays yet. Click New Display."
+        let text = "No displays yet."
         text.draw(in: bounds.insetBy(dx: 20, dy: 20), withAttributes: attrs)
     }
 
@@ -103,7 +120,7 @@ final class WorkspaceGridView: NSView {
         for workspace in orderedWorkspaces() {
             let tileSize = workspace.tileSize
 
-            if x > horizontalPadding && x + tileSize.width > horizontalPadding + availableWidth {
+            if x > horizontalPadding && x + tileSize.width > horizontalPadding + availableWidth + wrapTolerance {
                 totalHeight += rowHeight + spacing
                 x = horizontalPadding
                 rowHeight = 0.0
@@ -127,12 +144,20 @@ final class WorkspaceGridView: NSView {
         window?.makeFirstResponder(self)
 
         let point = convert(event.locationInWindow, from: nil)
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let isSelectionToggleClick = modifiers.contains(.command) || modifiers.contains(.shift)
 
         let byID = Dictionary(uniqueKeysWithValues: workspaces.map { ($0.id, $0) })
         for workspaceID in activeOrderIDs().reversed() {
             guard let workspace = byID[workspaceID],
                   let frame = tileFrames[workspace.id],
                   frame.contains(point) else { continue }
+
+            let pointInTile = CGPoint(x: point.x - frame.minX, y: point.y - frame.minY)
+            if isSelectionToggleClick {
+                onFocusRequest?(workspace.id, pointInTile, frame, modifiers)
+                return
+            }
 
             let resizeHandle = CGRect(x: frame.maxX - 16, y: frame.minY, width: 16, height: 16)
             if resizeHandle.contains(point) {
@@ -142,8 +167,7 @@ final class WorkspaceGridView: NSView {
                 return
             }
 
-            let pointInTile = CGPoint(x: point.x - frame.minX, y: point.y - frame.minY)
-            onFocusRequest?(workspace.id, pointInTile, frame)
+            onFocusRequest?(workspace.id, pointInTile, frame, modifiers)
 
             dragWorkspaceID = workspace.id
             resizeStartPoint = point
@@ -155,6 +179,8 @@ final class WorkspaceGridView: NSView {
             dragDidMove = false
             return
         }
+
+        onBackgroundClick?()
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -279,11 +305,11 @@ final class WorkspaceGridView: NSView {
         let availableWidth = max(300.0, bounds.width - horizontalPadding * 2.0)
         let totalSpacing = CGFloat(max(0, safeColumns - 1)) * spacing
         let targetWidth = max(160.0, (availableWidth - totalSpacing) / CGFloat(safeColumns))
-        return normalizedTileSize(targetWidth: targetWidth, pixelSize: pixelSize)
+        return normalizedTileSize(targetWidth: targetWidth, pixelSize: pixelSize, limitMaxHeight: false)
     }
 
     func reasonableFixedTileSize(for pixelSize: CGSize) -> CGSize {
-        normalizedTileSize(targetWidth: 420.0, pixelSize: pixelSize)
+        normalizedTileSize(targetWidth: 420.0, pixelSize: pixelSize, limitMaxHeight: true)
     }
 
     private func recomputeTileFrames() {
@@ -308,12 +334,13 @@ final class WorkspaceGridView: NSView {
             CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeInEaseOut))
         }
 
-        for (index, workspace) in orderedWorkspaces().enumerated() {
+        for workspace in orderedWorkspaces() {
             guard let frame = tileFrames[workspace.id] else { continue }
             let layers = tileLayers[workspace.id] ?? makeTileLayers(hostLayer: hostLayer)
             tileLayers[workspace.id] = layers
 
             let isFocused = workspace.id == focusedWorkspaceID
+            let isSelected = selectedWorkspaceIDs.contains(workspace.id)
             let isDragged = workspace.id == dragWorkspaceID
 
             if isDragged, let dragFrame {
@@ -327,16 +354,30 @@ final class WorkspaceGridView: NSView {
             layers.root.zPosition = isDragged ? 10.0 : 0.0
             layers.preview.frame = layers.root.bounds.insetBy(dx: 1.5, dy: 1.5)
             layers.overlay.frame = layers.root.bounds
-            layers.overlay.backgroundColor = NSColor.black.withAlphaComponent(isDragged ? 0.12 : 0.25).cgColor
+            layers.overlay.backgroundColor = NSColor.black.withAlphaComponent(isDragged ? 0.12 : (isSelected ? 0.18 : 0.25)).cgColor
             layers.border.frame = layers.root.bounds
 
             layers.title.frame = CGRect(x: 12, y: layers.root.bounds.height - 24, width: layers.root.bounds.width - 24, height: 18)
-            layers.title.string = "\(index + 1)"
+            if showsDisplayIDs {
+                layers.title.string = "\(workspace.displayID)"
+                layers.title.isHidden = false
+            } else {
+                layers.title.string = ""
+                layers.title.isHidden = true
+            }
             layers.subtitle.string = ""
             layers.subtitle.isHidden = true
 
-            layers.border.borderColor = (isFocused ? NSColor.controlAccentColor : NSColor.separatorColor).cgColor
-            layers.border.borderWidth = isFocused ? 2.0 : 1.0
+            if isFocused {
+                layers.border.borderColor = NSColor.controlAccentColor.cgColor
+                layers.border.borderWidth = 2.0
+            } else if isSelected {
+                layers.border.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.75).cgColor
+                layers.border.borderWidth = 1.5
+            } else {
+                layers.border.borderColor = NSColor.separatorColor.cgColor
+                layers.border.borderWidth = 1.0
+            }
 
             let handleRect = CGRect(x: layers.root.bounds.width - 16, y: 0, width: 16, height: 16)
             let handlePath = CGMutablePath()
@@ -485,7 +526,7 @@ final class WorkspaceGridView: NSView {
             guard let workspace = byID[workspaceID] else { continue }
             let tileSize = workspace.tileSize
 
-            if x > horizontalPadding && x + tileSize.width > horizontalPadding + availableWidth {
+            if x > horizontalPadding && x + tileSize.width > horizontalPadding + availableWidth + wrapTolerance {
                 x = horizontalPadding
                 y -= rowHeight + spacing
                 rowHeight = 0.0
@@ -532,12 +573,16 @@ final class WorkspaceGridView: NSView {
         }
     }
 
-    private func normalizedTileSize(targetWidth: CGFloat, pixelSize: CGSize) -> CGSize {
+    private func normalizedTileSize(targetWidth: CGFloat, pixelSize: CGSize, limitMaxHeight: Bool) -> CGSize {
         let ratio = max(0.1, pixelSize.width / max(1.0, pixelSize.height))
         let minHeight = max(140.0, 220.0 / ratio)
         let maxHeight = min(900.0, 1200.0 / ratio)
         var targetHeight = targetWidth / ratio
-        targetHeight = max(minHeight, min(maxHeight, targetHeight))
+        if limitMaxHeight {
+            targetHeight = max(minHeight, min(maxHeight, targetHeight))
+        } else {
+            targetHeight = max(minHeight, targetHeight)
+        }
         return CGSize(width: targetHeight * ratio, height: targetHeight)
     }
 }

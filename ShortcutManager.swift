@@ -9,6 +9,7 @@ enum ShortcutAction: String, CaseIterable {
     case focusPrevious = "focus_previous"
     case layoutFullWidth = "layout_full_width"
     case layout2x2 = "layout_2x2"
+    case fullscreenSelected = "fullscreen_selected"
 
     var title: String {
         switch self {
@@ -19,18 +20,20 @@ enum ShortcutAction: String, CaseIterable {
         case .focusPrevious: return "Focus Previous"
         case .layoutFullWidth: return "Layout Full Width"
         case .layout2x2: return "Layout 2x2"
+        case .fullscreenSelected: return "Fullscreen Selected"
         }
     }
 
     var defaultShortcut: String {
         switch self {
         case .toggleTeleport: return "ctrl+alt+space"
-        case .newDisplay: return "ctrl+alt+n"
-        case .removeDisplay: return "ctrl+alt+backspace"
+        case .newDisplay: return "cmd+n"
+        case .removeDisplay: return "cmd+w"
         case .focusNext: return "ctrl+alt+l"
         case .focusPrevious: return "ctrl+alt+h"
         case .layoutFullWidth: return "ctrl+alt+1"
         case .layout2x2: return "ctrl+alt+2"
+        case .fullscreenSelected: return "ctrl+alt+f"
         }
     }
 
@@ -39,9 +42,9 @@ enum ShortcutAction: String, CaseIterable {
         case .toggleTeleport:
             return ["ctrl+alt+space", "cmd+alt+space", "ctrl+alt+t"]
         case .newDisplay:
-            return ["ctrl+alt+n", "cmd+alt+n", "ctrl+alt+enter"]
+            return ["cmd+n", "ctrl+alt+n", "cmd+alt+n"]
         case .removeDisplay:
-            return ["ctrl+alt+backspace", "cmd+alt+backspace", "ctrl+alt+w"]
+            return ["cmd+w", "ctrl+alt+backspace", "ctrl+alt+w"]
         case .focusNext:
             return ["ctrl+alt+l", "ctrl+alt+right", "cmd+alt+right"]
         case .focusPrevious:
@@ -50,6 +53,8 @@ enum ShortcutAction: String, CaseIterable {
             return ["ctrl+alt+1", "cmd+alt+1", "ctrl+alt+f"]
         case .layout2x2:
             return ["ctrl+alt+2", "cmd+alt+2", "ctrl+alt+g"]
+        case .fullscreenSelected:
+            return ["ctrl+alt+f", "cmd+shift+f", "ctrl+alt+enter"]
         }
     }
 }
@@ -86,13 +91,26 @@ final class ShortcutManager {
         let loaded = store.load()
         var resolved: [ShortcutAction: String] = [:]
         for action in ShortcutAction.allCases {
-            let candidate = loaded.bindings[action] ?? action.defaultShortcut
+            let loadedBinding = loaded.bindings[action]
+            let candidate = Self.migrateLegacyDefault(for: action, loadedBinding: loadedBinding) ?? loadedBinding ?? action.defaultShortcut
             resolved[action] = candidate
         }
         bindings = resolved
         chords = ShortcutManager.compile(bindings: resolved)
         tileSizingMode = loaded.tileSizingMode ?? .dynamic
         store.save(bindings: bindings, tileSizingMode: tileSizingMode)
+    }
+
+    private static func migrateLegacyDefault(for action: ShortcutAction, loadedBinding: String?) -> String? {
+        guard let loadedBinding else { return nil }
+        switch action {
+        case .newDisplay where loadedBinding == "ctrl+alt+n":
+            return action.defaultShortcut
+        case .removeDisplay where loadedBinding == "ctrl+alt+backspace":
+            return action.defaultShortcut
+        default:
+            return nil
+        }
     }
 
     func action(for event: NSEvent) -> ShortcutAction? {

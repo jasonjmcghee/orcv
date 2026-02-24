@@ -12,6 +12,7 @@ struct PersistedWorkspaceState: Codable {
     var version: Int
     var nextVirtualIndex: Int
     var focusedIndex: Int?
+    var dynamicLayoutColumns: Int?
     var workspaces: [WorkspaceEntry]
 }
 
@@ -71,4 +72,3 @@ final class WorkspaceStateStore {
         }
     }
 }
-

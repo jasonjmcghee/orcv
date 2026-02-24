@@ -1,10 +1,50 @@
 import CoreGraphics
 import Darwin
 import Foundation
+import AppKit
 
 final class VirtualDisplayManager {
+    struct DisplayProfile {
+        let width: Int
+        let height: Int
+        let hiDPI: Bool
+        let physicalSizeMM: CGSize
+    }
+
     private var virtualDisplays: [CGDirectDisplayID: CGVirtualDisplay] = [:]
     private var serialCounter: UInt32 = 100
+
+    func mainDisplayProfile() -> DisplayProfile {
+        let mainID = CGMainDisplayID()
+        var width = max(1, Int(CGDisplayPixelsWide(mainID)))
+        var height = max(1, Int(CGDisplayPixelsHigh(mainID)))
+        var hiDPI = false
+
+        if let mode = CGDisplayCopyDisplayMode(mainID) {
+            let logicalWidth = max(1, Int(mode.width))
+            let logicalHeight = max(1, Int(mode.height))
+            let pixelWidth = max(1, Int(mode.pixelWidth))
+            let pixelHeight = max(1, Int(mode.pixelHeight))
+            width = logicalWidth
+            height = logicalHeight
+            hiDPI = max(
+                CGFloat(pixelWidth) / CGFloat(logicalWidth),
+                CGFloat(pixelHeight) / CGFloat(logicalHeight)
+            ) > 1.25
+        }
+
+        var physical = CGDisplayScreenSize(mainID)
+        if !physical.width.isFinite || !physical.height.isFinite || physical.width <= 1.0 || physical.height <= 1.0 {
+            physical = CGSize(width: 600.0, height: 340.0)
+        }
+
+        return DisplayProfile(
+            width: width,
+            height: height,
+            hiDPI: hiDPI,
+            physicalSizeMM: physical
+        )
+    }
 
     func physicalDisplayDescriptors() -> [DisplayDescriptor] {
         var displayCount: UInt32 = 0
@@ -67,7 +107,13 @@ final class VirtualDisplayManager {
         return workspaceTiles.isEmpty ? physical : workspaceTiles
     }
 
-    func createVirtualDisplay(name: String, width: Int, height: Int, hidpi: Bool = true) -> DisplayDescriptor? {
+    func createVirtualDisplay(
+        name: String,
+        width: Int,
+        height: Int,
+        hidpi: Bool = true,
+        physicalSizeMM: CGSize? = nil
+    ) -> DisplayDescriptor? {
         let descriptor = CGVirtualDisplayDescriptor()
         descriptor.setDispatchQueue(DispatchQueue.main)
         descriptor.name = name
@@ -75,7 +121,7 @@ final class VirtualDisplayManager {
         let requestedMaxHeight = height * (hidpi ? 2 : 1)
         descriptor.maxPixelsWide = UInt32(max(8192, requestedMaxWidth))
         descriptor.maxPixelsHigh = UInt32(max(8192, requestedMaxHeight))
-        descriptor.sizeInMillimeters = CGSize(width: 600, height: 340)
+        descriptor.sizeInMillimeters = physicalSizeMM ?? CGSize(width: 600, height: 340)
         descriptor.serialNum = serialCounter
         descriptor.productID = 0x1234
         descriptor.vendorID = 0x3456
@@ -95,13 +141,48 @@ final class VirtualDisplayManager {
         serialCounter += 1
         let displayID = display.displayID
         virtualDisplays[displayID] = display
+        let actualPixelSize = resolvedPixelSize(displayID: displayID, fallbackLogicalWidth: width, fallbackLogicalHeight: height, hidpi: hidpi)
 
         return DisplayDescriptor(
             displayID: displayID,
             title: name,
-            pixelSize: CGSize(width: width, height: height),
+            pixelSize: actualPixelSize,
             kind: .virtual
         )
+    }
+
+    private func resolvedPixelSize(
+        displayID: CGDirectDisplayID,
+        fallbackLogicalWidth: Int,
+        fallbackLogicalHeight: Int,
+        hidpi: Bool
+    ) -> CGSize {
+        if let mode = CGDisplayCopyDisplayMode(displayID) {
+            let logicalW = max(1, Int(mode.width))
+            let logicalH = max(1, Int(mode.height))
+            let pixelW = max(1, Int(mode.pixelWidth))
+            let pixelH = max(1, Int(mode.pixelHeight))
+            NSLog(
+                "VirtualDisplayManager mode display=%u logical=%dx%d pixel=%dx%d",
+                displayID,
+                logicalW,
+                logicalH,
+                pixelW,
+                pixelH
+            )
+            return CGSize(width: pixelW, height: pixelH)
+        }
+
+        let fallbackScale = hidpi ? 2 : 1
+        let fallbackW = max(1, fallbackLogicalWidth * fallbackScale)
+        let fallbackH = max(1, fallbackLogicalHeight * fallbackScale)
+        NSLog(
+            "VirtualDisplayManager mode unavailable display=%u fallbackPixel=%dx%d",
+            displayID,
+            fallbackW,
+            fallbackH
+        )
+        return CGSize(width: fallbackW, height: fallbackH)
     }
 
     func removeVirtualDisplay(displayID: CGDirectDisplayID) -> Bool {
@@ -109,6 +190,10 @@ final class VirtualDisplayManager {
             return false
         }
         return true
+    }
+
+    func removeAllVirtualDisplays() {
+        virtualDisplays.removeAll()
     }
 
     func applyDisplayOrigins(_ origins: [CGDirectDisplayID: CGPoint]) -> Bool {

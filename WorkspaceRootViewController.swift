@@ -10,21 +10,34 @@ final class WorkspaceRootViewController: NSViewController {
     private let stateStore: WorkspaceStateStore
     private let streamManager = DisplayStreamManager()
     private let hasScreenCaptureAccess: Bool
+    private lazy var previewWindowController = WorkspacePreviewWindowController(surfaceProvider: { [weak self] displayID in
+        self?.streamManager.latestSurface(for: displayID)
+    })
 
     private let scrollView = NSScrollView(frame: .zero)
     private let gridView = WorkspaceGridView(frame: .zero)
-    private let titleLabel = NSTextField(labelWithString: "Workspace Grid")
-    private let subtitleLabel = NSTextField(labelWithString: "Drag tiles to rearrange displays. Click to focus. Control+Option+Space toggles teleport.")
+    private let controlsStack = NSStackView(frame: .zero)
     private let addButton = NSButton(title: "New Display", target: nil, action: nil)
     private let removeButton = NSButton(title: "Remove Display", target: nil, action: nil)
+    private let tileStatusOverlay = NSVisualEffectView(frame: .zero)
+    private let tileStatusLabel = NSTextField(labelWithString: "")
+    private let macroEngine = InputMacroEngine()
+    private var titlebarAccessoryController: NSTitlebarAccessoryViewController?
 
     private var nextVirtualIndex: Int = 1
     private var localSwipeMonitor: Any?
     private var globalSwipeMonitor: Any?
     private var lastTeleportTime: TimeInterval = 0
+    private var lastCommandTapTimestamp: TimeInterval = 0
     private var arrangementDebounceWorkItem: DispatchWorkItem?
+    private var dynamicLayoutDebounceWorkItem: DispatchWorkItem?
     private var lastAppliedOrigins: [CGDirectDisplayID: CGPoint] = [:]
+    private var activeDynamicLayoutColumns: Int?
+    private var lastDynamicLayoutViewportWidth: CGFloat = 0
     private var isRestoringState = false
+    private let lifecycleQueue = DispatchQueue(label: "com.pointworks.workspacegrid.lifecycle", qos: .userInitiated)
+
+    var onMacroStateDidChange: (() -> Void)?
 
     init(
         displayManager: VirtualDisplayManager,
@@ -54,6 +67,7 @@ final class WorkspaceRootViewController: NSViewController {
         if let globalSwipeMonitor {
             NSEvent.removeMonitor(globalSwipeMonitor)
         }
+        dynamicLayoutDebounceWorkItem?.cancel()
     }
 
     override func loadView() {
@@ -66,21 +80,25 @@ final class WorkspaceRootViewController: NSViewController {
     override func viewDidLayout() {
         super.viewDidLayout()
         layoutGridDocumentView()
+        if view.window?.inLiveResize == true {
+            scheduleDynamicLayoutRefreshDuringLiveResize()
+        } else {
+            dynamicLayoutDebounceWorkItem?.cancel()
+            refreshDynamicPresetLayoutForViewportIfNeeded()
+        }
     }
 
     private func setupUI() {
-        titleLabel.font = NSFont.systemFont(ofSize: 20, weight: .semibold)
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        subtitleLabel.font = NSFont.systemFont(ofSize: 12, weight: .regular)
-        subtitleLabel.textColor = .secondaryLabelColor
-        subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        configureIconButton(addButton, symbolName: "plus", accessibilityLabel: "New Display")
+        configureIconButton(removeButton, symbolName: "xmark", accessibilityLabel: "Remove Display")
 
-        addButton.bezelStyle = .rounded
-        addButton.controlSize = .large
-        addButton.translatesAutoresizingMaskIntoConstraints = false
-        removeButton.bezelStyle = .rounded
-        removeButton.controlSize = .large
-        removeButton.translatesAutoresizingMaskIntoConstraints = false
+        controlsStack.translatesAutoresizingMaskIntoConstraints = false
+        controlsStack.orientation = .horizontal
+        controlsStack.alignment = .centerY
+        controlsStack.spacing = 8
+        controlsStack.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+        controlsStack.addArrangedSubview(addButton)
+        controlsStack.addArrangedSubview(removeButton)
 
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.drawsBackground = false
@@ -92,29 +110,77 @@ final class WorkspaceRootViewController: NSViewController {
         gridView.frame = NSRect(x: 0, y: 0, width: 1200, height: 720)
         scrollView.documentView = gridView
 
+        tileStatusOverlay.translatesAutoresizingMaskIntoConstraints = false
+        tileStatusOverlay.material = .underWindowBackground
+        tileStatusOverlay.blendingMode = .withinWindow
+        tileStatusOverlay.state = .active
+        tileStatusOverlay.wantsLayer = true
+        tileStatusOverlay.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.72).cgColor
+        tileStatusOverlay.isHidden = true
+
+        tileStatusLabel.translatesAutoresizingMaskIntoConstraints = false
+        tileStatusLabel.font = NSFont.systemFont(ofSize: 18, weight: .semibold)
+        tileStatusLabel.textColor = .secondaryLabelColor
+        tileStatusLabel.alignment = .center
+
+        tileStatusOverlay.addSubview(tileStatusLabel)
+
         view.addSubview(scrollView)
-        view.addSubview(titleLabel)
-        view.addSubview(subtitleLabel)
-        view.addSubview(addButton)
-        view.addSubview(removeButton)
+        view.addSubview(tileStatusOverlay)
 
         NSLayoutConstraint.activate([
-            titleLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            titleLabel.topAnchor.constraint(equalTo: view.topAnchor, constant: 10),
-
-            subtitleLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
-            subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 2),
-
-            removeButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-            removeButton.topAnchor.constraint(equalTo: view.topAnchor, constant: 18),
-
-            addButton.trailingAnchor.constraint(equalTo: removeButton.leadingAnchor, constant: -10),
-            addButton.topAnchor.constraint(equalTo: removeButton.topAnchor),
-
-            scrollView.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 10),
+            scrollView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 2),
             scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+
+            tileStatusOverlay.topAnchor.constraint(equalTo: scrollView.topAnchor),
+            tileStatusOverlay.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
+            tileStatusOverlay.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
+            tileStatusOverlay.bottomAnchor.constraint(equalTo: scrollView.bottomAnchor),
+
+            tileStatusLabel.centerXAnchor.constraint(equalTo: tileStatusOverlay.centerXAnchor),
+            tileStatusLabel.centerYAnchor.constraint(equalTo: tileStatusOverlay.centerYAnchor),
+        ])
+    }
+
+    func attachTitlebarControls(to window: NSWindow) {
+        if titlebarAccessoryController != nil {
+            return
+        }
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 84, height: 40))
+        container.translatesAutoresizingMaskIntoConstraints = false
+        controlsStack.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(controlsStack)
+        NSLayoutConstraint.activate([
+            controlsStack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            controlsStack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            controlsStack.centerYAnchor.constraint(equalTo: container.centerYAnchor, constant: 8),
+            container.heightAnchor.constraint(equalToConstant: 40),
+        ])
+
+        let accessory = NSTitlebarAccessoryViewController()
+        accessory.layoutAttribute = .right
+        accessory.fullScreenMinHeight = 40
+        accessory.view = container
+        window.addTitlebarAccessoryViewController(accessory)
+        titlebarAccessoryController = accessory
+    }
+
+    private func configureIconButton(_ button: NSButton, symbolName: String, accessibilityLabel: String) {
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.bezelStyle = .texturedRounded
+        button.controlSize = .regular
+        button.title = ""
+        button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: accessibilityLabel)
+        button.imagePosition = .imageOnly
+        button.toolTip = accessibilityLabel
+        button.contentTintColor = .labelColor
+        button.setAccessibilityLabel(accessibilityLabel)
+        NSLayoutConstraint.activate([
+            button.widthAnchor.constraint(equalToConstant: 28),
+            button.heightAnchor.constraint(equalToConstant: 28),
         ])
     }
 
@@ -133,18 +199,28 @@ final class WorkspaceRootViewController: NSViewController {
         shortcutManager.onDidChange = { [weak self] in
             DispatchQueue.main.async {
                 if self?.shortcutManager.tileSizingMode == .fixed {
+                    self?.activeDynamicLayoutColumns = nil
                     self?.applyFixedReasonableTileSizing()
+                } else {
+                    self?.lastDynamicLayoutViewportWidth = 0
                 }
                 self?.renderStore()
             }
         }
 
-        gridView.onFocusRequest = { [weak self] workspaceID, pointInTile, frameInGrid in
+        gridView.onFocusRequest = { [weak self] workspaceID, pointInTile, frameInGrid, modifiers in
             guard let self else { return }
             _ = pointInTile
             _ = frameInGrid
+            if modifiers.contains(.command) || modifiers.contains(.shift) {
+                self.workspaceStore.toggleSelection(workspaceID: workspaceID)
+            } else {
+                self.workspaceStore.selectOnly(workspaceID: workspaceID)
+            }
+        }
 
-            self.workspaceStore.focus(workspaceID: workspaceID)
+        gridView.onBackgroundClick = { [weak self] in
+            self?.workspaceStore.clearSelection()
         }
 
         gridView.onResizeRequest = { [weak self] workspaceID, newSize in
@@ -152,6 +228,7 @@ final class WorkspaceRootViewController: NSViewController {
             if self.shortcutManager.tileSizingMode == .fixed {
                 self.applyFixedReasonableTileSizing()
             } else {
+                self.activeDynamicLayoutColumns = nil
                 self.workspaceStore.resizeAllWorkspaces(from: workspaceID, tileSize: newSize)
             }
             self.scheduleArrangementSync()
@@ -170,48 +247,128 @@ final class WorkspaceRootViewController: NSViewController {
             self?.gridView.refreshPreviews()
         }
 
+        streamManager.onDisplayFrame = { [weak self] displayID, surface in
+            self?.previewWindowController.consumeFrame(displayID: displayID, surface: surface)
+        }
+
         streamManager.onError = { [weak self] message in
             DispatchQueue.main.async {
-                self?.subtitleLabel.stringValue = message
+                self?.setTileStatus(message)
+            }
+        }
+
+        macroEngine.onStateChanged = { [weak self] in
+            DispatchQueue.main.async {
+                self?.renderStore()
             }
         }
 
         installSwipeMonitorsIfNeeded()
+        updateMacroControls()
     }
 
     private func bootstrapDisplays() {
-        if restoreStateIfAvailable() {
-            return
-        }
-
-        workspaceStore.replaceWorkspaces(from: [])
-        if hasScreenCaptureAccess {
-            streamManager.configureStreams(for: [])
-        } else {
-            subtitleLabel.stringValue = "Screen Recording permission required for live display previews."
+        setTileStatus("Loading displays...")
+        lifecycleQueue.async { [weak self] in
+            guard let self else { return }
+            let bootstrap = self.buildBootstrapState()
+            DispatchQueue.main.async {
+                self.applyBootstrapState(bootstrap)
+            }
         }
     }
 
     private func renderStore() {
         gridView.workspaces = workspaceStore.workspaces
         gridView.focusedWorkspaceID = workspaceStore.focusedWorkspaceID
-        let teleportHint = shortcutManager.displayLabel(for: .toggleTeleport)
-        subtitleLabel.stringValue = "\(workspaceStore.workspaces.count) displays • Drag to move • Click to focus • \(teleportHint) toggles teleport."
-        removeButton.isEnabled = workspaceStore.focusedWorkspace?.kind == .virtual
+        gridView.selectedWorkspaceIDs = workspaceStore.selectedWorkspaceIDs
+        let validDisplayIDs = Set(workspaceStore.workspaces.map(\.displayID))
+        previewWindowController.closeIfDisplayMissing(validDisplayIDs: validDisplayIDs)
         layoutGridDocumentView()
+        updateMacroControls()
+    }
+
+    @objc
+    private func handleStartRecording() {
+        let virtualIDs = Set(workspaceStore.workspaces.filter { $0.kind == .virtual }.map(\.displayID))
+        if !macroEngine.startRecording(virtualDisplayIDs: virtualIDs) {
+            NSSound.beep()
+        }
+    }
+
+    @objc
+    private func handleStopRecording() {
+        macroEngine.stopRecording()
+    }
+
+    @objc
+    private func handleReplayRecording() {
+        let selectedTargets = workspaceStore.selectedWorkspaces.filter { $0.kind == .virtual }
+        let targets: [Workspace]
+        if !selectedTargets.isEmpty {
+            targets = selectedTargets
+        } else if let focused = workspaceStore.focusedWorkspace, focused.kind == .virtual {
+            targets = [focused]
+        } else {
+            targets = []
+        }
+
+        guard !targets.isEmpty else {
+            NSSound.beep()
+            return
+        }
+
+        macroEngine.replaySequential(on: targets.map(\.displayID))
+    }
+
+    private func updateMacroControls() {
+        onMacroStateDidChange?()
+    }
+
+    func macroState() -> (isRecording: Bool, isReplaying: Bool, hasRecording: Bool) {
+        (
+            isRecording: macroEngine.isRecording,
+            isReplaying: macroEngine.isReplaying,
+            hasRecording: macroEngine.recordedEventCount > 0
+        )
+    }
+
+    func menuToggleRecording() {
+        if macroEngine.isRecording {
+            handleStopRecording()
+        } else if !macroEngine.isReplaying {
+            handleStartRecording()
+        }
+    }
+
+    func menuReplayRecording() {
+        guard !macroEngine.isRecording, !macroEngine.isReplaying else { return }
+        handleReplayRecording()
     }
 
     @objc
     private func handleNewDisplay() {
+        let templateTileSize = workspaceStore.focusedWorkspace?.tileSize ?? workspaceStore.workspaces.first?.tileSize
         let name = "\(nextVirtualIndex)"
         nextVirtualIndex += 1
+        let profile = displayManager.mainDisplayProfile()
 
-        guard let descriptor = displayManager.createVirtualDisplay(name: name, width: 1920, height: 1080, hidpi: true) else {
+        guard let descriptor = displayManager.createVirtualDisplay(
+            name: name,
+            width: profile.width,
+            height: profile.height,
+            hidpi: profile.hiDPI,
+            physicalSizeMM: profile.physicalSizeMM
+        ) else {
             NSSound.beep()
             return
         }
 
         workspaceStore.addWorkspace(from: descriptor)
+        if let templateTileSize,
+           let newWorkspaceID = workspaceStore.focusedWorkspaceID {
+            workspaceStore.resizeWorkspace(workspaceID: newWorkspaceID, tileSize: templateTileSize)
+        }
         streamManager.configureStreams(for: currentDisplayDescriptors())
         scheduleArrangementSync()
     }
@@ -249,22 +406,73 @@ final class WorkspaceRootViewController: NSViewController {
         stateStore.flushNow(makeSnapshot())
     }
 
+    func menuNewDisplay() {
+        handleNewDisplay()
+    }
+
+    func menuRemoveFocusedDisplay() {
+        handleRemoveFocused()
+    }
+
+    func canRemoveSelectedDisplay() -> Bool {
+        guard !workspaceStore.selectedWorkspaceIDs.isEmpty else { return false }
+        guard let focused = workspaceStore.focusedWorkspace else { return false }
+        return focused.kind == .virtual
+    }
+
+    func beginShutdown(completion: @escaping () -> Void) {
+        setTileStatus("Cleaning up displays...")
+        previewWindowController.closePreview()
+        let snapshot = makeSnapshot()
+        lifecycleQueue.async { [weak self] in
+            guard let self else {
+                DispatchQueue.main.async {
+                    completion()
+                }
+                return
+            }
+
+            self.stateStore.flushNow(snapshot)
+            self.streamManager.stopAll()
+            self.displayManager.removeAllVirtualDisplays()
+            DispatchQueue.main.async {
+                completion()
+            }
+        }
+    }
+
     private func installSwipeMonitorsIfNeeded() {
         if localSwipeMonitor == nil {
-            localSwipeMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+            localSwipeMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
                 guard let self else { return event }
                 let consumed = self.handleNavigationEvent(event)
                 return consumed ? nil : event
             }
         }
         if globalSwipeMonitor == nil {
-            globalSwipeMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+            globalSwipeMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
                 _ = self?.handleNavigationEvent(event)
             }
         }
     }
 
     private func handleNavigationEvent(_ event: NSEvent) -> Bool {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        applyTileLabelMode(modifiers: mods)
+
+        if maybeHandleDoubleCommandTap(event) {
+            return true
+        }
+
+        if event.type != .keyDown {
+            return false
+        }
+
+        if event.keyCode == 3, mods == [.control, .option] {
+            openFullscreenForFocusedWorkspace()
+            return true
+        }
+
         guard let action = shortcutManager.action(for: event) else { return false }
 
         switch action {
@@ -294,7 +502,45 @@ final class WorkspaceRootViewController: NSViewController {
         case .layout2x2:
             applyLayout(columns: 2)
             return true
+        case .fullscreenSelected:
+            openFullscreenForFocusedWorkspace()
+            return true
         }
+    }
+
+    private func maybeHandleDoubleCommandTap(_ event: NSEvent) -> Bool {
+        guard event.type == .flagsChanged else { return false }
+        guard event.keyCode == 55 || event.keyCode == 54 else { return false } // left/right command
+
+        let isDown = CGEventSource.keyState(.combinedSessionState, key: event.keyCode)
+        guard isDown else { return false }
+
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard mods == [.command] else {
+            lastCommandTapTimestamp = 0
+            return false
+        }
+
+        let now = event.timestamp
+        if lastCommandTapTimestamp > 0, now - lastCommandTapTimestamp <= 0.5 {
+            lastCommandTapTimestamp = 0
+
+            if previewWindowController.isPresenting {
+                previewWindowController.closePreview()
+                return true
+            }
+
+            let uptime = ProcessInfo.processInfo.systemUptime
+            if uptime - lastTeleportTime < 0.12 {
+                return false
+            }
+            lastTeleportTime = uptime
+            toggleTeleport()
+            return true
+        }
+
+        lastCommandTapTimestamp = now
+        return false
     }
 
     private func toggleTeleport() {
@@ -455,6 +701,14 @@ final class WorkspaceRootViewController: NSViewController {
 
     private func applyLayout(columns: Int) {
         guard !workspaceStore.workspaces.isEmpty else { return }
+
+        if shortcutManager.tileSizingMode == .dynamic {
+            activeDynamicLayoutColumns = columns
+            lastDynamicLayoutViewportWidth = 0
+        } else {
+            activeDynamicLayoutColumns = nil
+        }
+
         let sizes: [UUID: CGSize] = Dictionary(uniqueKeysWithValues:
             workspaceStore.workspaces.map { workspace in
                 (workspace.id, gridView.tileSize(for: workspace.displayPixelSize, columns: columns))
@@ -466,12 +720,65 @@ final class WorkspaceRootViewController: NSViewController {
 
     private func applyFixedReasonableTileSizing() {
         guard !workspaceStore.workspaces.isEmpty else { return }
+        activeDynamicLayoutColumns = nil
         let sizes: [UUID: CGSize] = Dictionary(uniqueKeysWithValues:
             workspaceStore.workspaces.map { workspace in
                 (workspace.id, gridView.reasonableFixedTileSize(for: workspace.displayPixelSize))
             }
         )
         workspaceStore.setTileSizes(sizes)
+        scheduleArrangementSync()
+    }
+
+    private func openFullscreenForFocusedWorkspace() {
+        if previewWindowController.isPresenting {
+            previewWindowController.closePreview()
+            return
+        }
+
+        guard let focused = workspaceStore.focusedWorkspace else {
+            NSSound.beep()
+            return
+        }
+
+        previewWindowController.presentImmersive(for: focused)
+        pointerRouter.teleportToDisplay(displayID: focused.displayID)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.pointerRouter.teleportToDisplay(displayID: focused.displayID)
+        }
+    }
+
+    private func refreshDynamicPresetLayoutForViewportIfNeeded() {
+        guard shortcutManager.tileSizingMode == .dynamic,
+              let columns = activeDynamicLayoutColumns,
+              !workspaceStore.workspaces.isEmpty else {
+            return
+        }
+
+        let viewportWidth = max(1.0, scrollView.contentView.bounds.width)
+        guard abs(viewportWidth - lastDynamicLayoutViewportWidth) > 1.0 else { return }
+        lastDynamicLayoutViewportWidth = viewportWidth
+
+        let sizes: [UUID: CGSize] = Dictionary(uniqueKeysWithValues:
+            workspaceStore.workspaces.map { workspace in
+                (workspace.id, gridView.tileSize(for: workspace.displayPixelSize, columns: columns))
+            }
+        )
+        workspaceStore.setTileSizes(sizes)
+        scheduleArrangementSync()
+    }
+
+    private func scheduleDynamicLayoutRefreshDuringLiveResize() {
+        dynamicLayoutDebounceWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.refreshDynamicPresetLayoutForViewportIfNeeded()
+        }
+        dynamicLayoutDebounceWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+    }
+
+    private func applyTileLabelMode(modifiers: NSEvent.ModifierFlags) {
+        gridView.showsDisplayIDs = modifiers.contains(.option)
     }
 
     private func scheduleStateSave() {
@@ -500,34 +807,42 @@ final class WorkspaceRootViewController: NSViewController {
             version: 1,
             nextVirtualIndex: nextVirtualIndex,
             focusedIndex: focusedIndex,
+            dynamicLayoutColumns: activeDynamicLayoutColumns,
             workspaces: entries
         )
     }
 
-    private func restoreStateIfAvailable() -> Bool {
+    private struct BootstrapState {
+        let workspaces: [Workspace]
+        let focusedWorkspaceID: UUID?
+        let nextVirtualIndex: Int
+        let dynamicLayoutColumns: Int?
+    }
+
+    private func buildBootstrapState() -> BootstrapState {
         guard let persisted = stateStore.load(),
               persisted.version == 1,
               !persisted.workspaces.isEmpty else {
-            return false
+            return BootstrapState(
+                workspaces: [],
+                focusedWorkspaceID: nil,
+                nextVirtualIndex: nextVirtualIndex,
+                dynamicLayoutColumns: nil
+            )
         }
-
-        isRestoringState = true
-        defer {
-            isRestoringState = false
-        }
+        let profile = displayManager.mainDisplayProfile()
 
         var restored: [Workspace] = []
         restored.reserveCapacity(persisted.workspaces.count)
 
         for (index, entry) in persisted.workspaces.enumerated() {
             let title = entry.title.isEmpty ? "\(index + 1)" : entry.title
-            let width = max(640, entry.pixelWidth)
-            let height = max(360, entry.pixelHeight)
             guard let descriptor = displayManager.createVirtualDisplay(
                 name: title,
-                width: width,
-                height: height,
-                hidpi: true
+                width: profile.width,
+                height: profile.height,
+                hidpi: profile.hiDPI,
+                physicalSizeMM: profile.physicalSizeMM
             ) else {
                 continue
             }
@@ -556,13 +871,12 @@ final class WorkspaceRootViewController: NSViewController {
             focusedID = restored.first?.id
         }
 
-        workspaceStore.setWorkspaces(restored, focusedWorkspaceID: focusedID)
-        nextVirtualIndex = max(persisted.nextVirtualIndex, restored.count + 1)
-
-        streamManager.configureStreams(for: currentDisplayDescriptors())
-        scheduleArrangementSync()
-        scheduleStateSave()
-        return true
+        return BootstrapState(
+            workspaces: restored,
+            focusedWorkspaceID: focusedID,
+            nextVirtualIndex: max(persisted.nextVirtualIndex, restored.count + 1),
+            dynamicLayoutColumns: persisted.dynamicLayoutColumns
+        )
     }
 
     private func normalizedTileSize(_ raw: CGSize, pixelSize: CGSize) -> CGSize {
@@ -576,6 +890,62 @@ final class WorkspaceRootViewController: NSViewController {
         }
         targetHeight = max(minHeight, min(maxHeight, targetHeight))
         return CGSize(width: targetHeight * ratio, height: targetHeight)
+    }
+
+    func menuApplyLayoutFullWidth() {
+        applyLayout(columns: 1)
+    }
+
+    func menuApplyLayout2x2() {
+        applyLayout(columns: 2)
+    }
+
+    func menuFullscreenSelected() {
+        openFullscreenForFocusedWorkspace()
+    }
+
+    func menuSetTileSizingMode(_ mode: TileSizingMode) {
+        shortcutManager.updateTileSizingMode(mode)
+        if mode == .fixed {
+            applyFixedReasonableTileSizing()
+        } else {
+            lastDynamicLayoutViewportWidth = 0
+            refreshDynamicPresetLayoutForViewportIfNeeded()
+        }
+    }
+
+    private func applyBootstrapState(_ bootstrap: BootstrapState) {
+        isRestoringState = true
+        if bootstrap.workspaces.isEmpty {
+            workspaceStore.replaceWorkspaces(from: [])
+        } else {
+            workspaceStore.setWorkspaces(bootstrap.workspaces, focusedWorkspaceID: bootstrap.focusedWorkspaceID)
+            nextVirtualIndex = bootstrap.nextVirtualIndex
+            activeDynamicLayoutColumns = bootstrap.dynamicLayoutColumns
+        }
+        isRestoringState = false
+
+        if hasScreenCaptureAccess {
+            streamManager.configureStreams(for: currentDisplayDescriptors())
+        } else {
+            setTileStatus("Screen Recording permission required for live display previews.")
+        }
+        if !bootstrap.workspaces.isEmpty {
+            scheduleArrangementSync()
+            scheduleStateSave()
+        }
+
+        setTileStatus(nil)
+    }
+
+    private func setTileStatus(_ message: String?) {
+        if let message, !message.isEmpty {
+            tileStatusLabel.stringValue = message
+            tileStatusOverlay.isHidden = false
+        } else {
+            tileStatusOverlay.isHidden = true
+            tileStatusLabel.stringValue = ""
+        }
     }
 
 }

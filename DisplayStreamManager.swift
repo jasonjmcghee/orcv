@@ -39,7 +39,18 @@ final class DisplayStreamManager {
     private let surfaceQueue = DispatchQueue(label: "com.pointworks.workspacegrid.surface-store", attributes: .concurrent)
 
     var onFrame: (() -> Void)?
+    var onDisplayFrame: ((CGDirectDisplayID, IOSurface) -> Void)?
     var onError: ((String) -> Void)?
+
+    func stopAll() {
+        controlQueue.sync {
+            targetDescriptors.removeAll()
+            let ids = Array(entries.keys)
+            for displayID in ids {
+                stopStream(for: displayID)
+            }
+        }
+    }
 
     func configureStreams(for descriptors: [DisplayDescriptor]) {
         controlQueue.async { [weak self] in
@@ -94,6 +105,7 @@ final class DisplayStreamManager {
             }
 
             DispatchQueue.main.async {
+                self.onDisplayFrame?(descriptor.displayID, frameSurface)
                 self.onFrame?()
             }
         }
