@@ -36,20 +36,32 @@ final class WorkspaceStore {
         onDidChange?()
     }
 
-    func addWorkspace(from descriptor: DisplayDescriptor) {
-        workspaces.append(
-            Workspace(
-                id: UUID(),
-                displayID: descriptor.displayID,
-                title: descriptor.title,
-                kind: descriptor.kind,
-                displayPixelSize: descriptor.pixelSize,
-                tileSize: WorkspaceStore.defaultTileSize(for: descriptor.pixelSize)
-            )
+    @discardableResult
+    func addWorkspace(
+        from descriptor: DisplayDescriptor,
+        tileSize: CGSize? = nil,
+        at index: Int? = nil,
+        workspaceID: UUID = UUID()
+    ) -> Workspace {
+        let workspace = Workspace(
+            id: workspaceID,
+            displayID: descriptor.displayID,
+            title: descriptor.title,
+            kind: descriptor.kind,
+            displayPixelSize: descriptor.pixelSize,
+            tileSize: tileSize ?? WorkspaceStore.defaultTileSize(for: descriptor.pixelSize)
         )
-        focusedWorkspaceID = workspaces.last?.id
-        selectedWorkspaceIDs = focusedWorkspaceID.map { [$0] } ?? []
+
+        if let index {
+            let insertionIndex = max(0, min(index, workspaces.count))
+            workspaces.insert(workspace, at: insertionIndex)
+        } else {
+            workspaces.append(workspace)
+        }
+        focusedWorkspaceID = workspace.id
+        selectedWorkspaceIDs = [workspace.id]
         onDidChange?()
+        return workspace
     }
 
     func focus(workspaceID: UUID) {
@@ -173,6 +185,29 @@ final class WorkspaceStore {
         }
         onDidChange?()
         return removed
+    }
+
+    @discardableResult
+    func removeWorkspace(id: UUID) -> (workspace: Workspace, index: Int)? {
+        guard let index = workspaces.firstIndex(where: { $0.id == id }) else {
+            return nil
+        }
+        let removed = workspaces.remove(at: index)
+        selectedWorkspaceIDs.remove(removed.id)
+
+        if focusedWorkspaceID == removed.id {
+            focusedWorkspaceID = workspaces.first?.id
+        }
+        if selectedWorkspaceIDs.isEmpty, let focusedWorkspaceID {
+            selectedWorkspaceIDs = [focusedWorkspaceID]
+        }
+
+        onDidChange?()
+        return (removed, index)
+    }
+
+    func indexOfWorkspace(id: UUID) -> Int? {
+        workspaces.firstIndex(where: { $0.id == id })
     }
 
     func workspace(with id: UUID) -> Workspace? {

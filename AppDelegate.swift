@@ -2,7 +2,7 @@ import AppKit
 import CoreGraphics
 import Foundation
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     private static let mainWindowAutosaveName = "WorkspaceGridMainWindowFrame"
 
     private var window: NSWindow?
@@ -12,8 +12,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private weak var macroMenu: NSMenu?
     private weak var macroToggleMenuItem: NSMenuItem?
     private weak var macroReplayMenuItem: NSMenuItem?
-    private weak var addToolbarItem: NSToolbarItem?
-    private weak var removeToolbarItem: NSToolbarItem?
     private var terminateInProgress = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -42,7 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let window = NSWindow(
             contentRect: NSRect(x: 140, y: 120, width: 1280, height: 820),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
@@ -50,12 +48,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         window.title = "Workspace Grid"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
+        window.backgroundColor = .windowBackgroundColor
         window.tabbingMode = .disallowed
         window.isReleasedWhenClosed = false
         window.isRestorable = false
         window.animationBehavior = .none
-        window.toolbarStyle = .unified
-        window.toolbar = makeToolbar()
+        window.delegate = self
         window.contentViewController = root
 
         window.setFrameAutosaveName(Self.mainWindowAutosaveName)
@@ -65,12 +63,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.rootViewController = root
         root.onMacroStateDidChange = { [weak self] in
             self?.refreshMacroMenuItems()
-            self?.refreshToolbarItems()
         }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         refreshMacroMenuItems()
-        refreshToolbarItems()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -127,6 +123,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             keyEquivalent: "q"
         )
         appMenuItem.submenu = appMenu
+
+        let fileMenuItem = NSMenuItem()
+        mainMenu.addItem(fileMenuItem)
+
+        let fileMenu = NSMenu(title: "File")
+        let newDisplayItem = NSMenuItem(
+            title: "New Display",
+            action: #selector(fileNewDisplay(_:)),
+            keyEquivalent: "n"
+        )
+        newDisplayItem.keyEquivalentModifierMask = [.command]
+        newDisplayItem.target = self
+        fileMenu.addItem(newDisplayItem)
+
+        let closeDisplayItem = NSMenuItem(
+            title: "Close Display",
+            action: #selector(fileCloseDisplay(_:)),
+            keyEquivalent: "w"
+        )
+        closeDisplayItem.keyEquivalentModifierMask = [.command]
+        closeDisplayItem.target = self
+        fileMenu.addItem(closeDisplayItem)
+        fileMenuItem.submenu = fileMenu
+
+        let editMenuItem = NSMenuItem()
+        mainMenu.addItem(editMenuItem)
+
+        let editMenu = NSMenu(title: "Edit")
+        let undoItem = NSMenuItem(
+            title: "Undo",
+            action: Selector(("undo:")),
+            keyEquivalent: "z"
+        )
+        undoItem.keyEquivalentModifierMask = [.command]
+        editMenu.addItem(undoItem)
+
+        let redoItem = NSMenuItem(
+            title: "Redo",
+            action: Selector(("redo:")),
+            keyEquivalent: "Z"
+        )
+        redoItem.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(redoItem)
+        editMenuItem.submenu = editMenu
 
         let layoutMenuItem = NSMenuItem()
         mainMenu.addItem(layoutMenuItem)
@@ -236,6 +276,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc
+    private func fileNewDisplay(_ sender: Any?) {
+        _ = sender
+        rootViewController?.menuNewDisplay()
+    }
+
+    @objc
+    private func fileCloseDisplay(_ sender: Any?) {
+        _ = sender
+        rootViewController?.menuRemoveFocusedDisplay()
+    }
+
+    @objc
     private func applyLayoutFullWidth(_ sender: Any?) {
         _ = sender
         rootViewController?.menuApplyLayoutFullWidth()
@@ -292,87 +344,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         macroReplayMenuItem?.isEnabled = state.hasRecording && !state.isRecording && !state.isReplaying
     }
 
-    private func makeToolbar() -> NSToolbar {
-        let toolbar = NSToolbar(identifier: "WorkspaceGridToolbar")
-        toolbar.delegate = self
-        toolbar.displayMode = .iconOnly
-        toolbar.allowsUserCustomization = false
-        toolbar.autosavesConfiguration = false
-        return toolbar
-    }
-
-    private func refreshToolbarItems() {
-        addToolbarItem?.isEnabled = true
-        removeToolbarItem?.isEnabled = rootViewController?.canRemoveSelectedDisplay() ?? false
-    }
-
-    @objc
-    private func toolbarNewDisplay(_ sender: Any?) {
-        _ = sender
-        rootViewController?.menuNewDisplay()
-    }
-
-    @objc
-    private func toolbarRemoveDisplay(_ sender: Any?) {
-        _ = sender
-        rootViewController?.menuRemoveFocusedDisplay()
-    }
-}
-
-extension AppDelegate: NSToolbarDelegate {
-    private static let toolbarNewDisplayItemID = NSToolbarItem.Identifier("workspacegrid.newDisplay")
-    private static let toolbarRemoveDisplayItemID = NSToolbarItem.Identifier("workspacegrid.removeDisplay")
-
-    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [
-            Self.toolbarNewDisplayItemID,
-            Self.toolbarRemoveDisplayItemID,
-            .space,
-            .flexibleSpace
-        ]
-    }
-
-    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [
-            .flexibleSpace,
-            Self.toolbarNewDisplayItemID,
-            .space,
-            Self.toolbarRemoveDisplayItemID
-        ]
-    }
-
-    func toolbar(
-        _ toolbar: NSToolbar,
-        itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
-        willBeInsertedIntoToolbar flag: Bool
-    ) -> NSToolbarItem? {
-        _ = toolbar
-        _ = flag
-
-        if itemIdentifier == Self.toolbarNewDisplayItemID {
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.label = "New Display"
-            item.paletteLabel = "New Display"
-            item.toolTip = "New Display"
-            item.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New Display")
-            item.target = self
-            item.action = #selector(toolbarNewDisplay(_:))
-            addToolbarItem = item
-            return item
-        }
-
-        if itemIdentifier == Self.toolbarRemoveDisplayItemID {
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.label = "Remove Display"
-            item.paletteLabel = "Remove Display"
-            item.toolTip = "Remove Display"
-            item.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Remove Display")
-            item.target = self
-            item.action = #selector(toolbarRemoveDisplay(_:))
-            removeToolbarItem = item
-            return item
-        }
-
-        return nil
+    func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? {
+        _ = window
+        return rootViewController?.undoManager
     }
 }

@@ -16,25 +16,27 @@ final class WorkspaceRootViewController: NSViewController {
 
     private let scrollView = NSScrollView(frame: .zero)
     private let gridView = WorkspaceGridView(frame: .zero)
-    private let controlsStack = NSStackView(frame: .zero)
-    private let addButton = NSButton(title: "New Display", target: nil, action: nil)
-    private let removeButton = NSButton(title: "Remove Display", target: nil, action: nil)
     private let tileStatusOverlay = NSVisualEffectView(frame: .zero)
     private let tileStatusLabel = NSTextField(labelWithString: "")
     private let macroEngine = InputMacroEngine()
-    private var titlebarAccessoryController: NSTitlebarAccessoryViewController?
+    private let actionUndoManager = UndoManager()
 
     private var nextVirtualIndex: Int = 1
     private var localSwipeMonitor: Any?
     private var globalSwipeMonitor: Any?
+    private var windowLevelPollingTimer: Timer?
+    private var isGridWindowFloating = false
     private var lastTeleportTime: TimeInterval = 0
     private var lastCommandTapTimestamp: TimeInterval = 0
+    private var lastImmersiveToggleTime: TimeInterval = 0
+    private var immersiveTeleportWorkItem: DispatchWorkItem?
     private var arrangementDebounceWorkItem: DispatchWorkItem?
     private var dynamicLayoutDebounceWorkItem: DispatchWorkItem?
     private var lastAppliedOrigins: [CGDirectDisplayID: CGPoint] = [:]
     private var activeDynamicLayoutColumns: Int?
     private var lastDynamicLayoutViewportWidth: CGFloat = 0
     private var isRestoringState = false
+    private var resizeUndoBaseline: [UUID: CGSize]?
     private let lifecycleQueue = DispatchQueue(label: "com.pointworks.workspacegrid.lifecycle", qos: .userInitiated)
 
     var onMacroStateDidChange: (() -> Void)?
@@ -67,14 +69,33 @@ final class WorkspaceRootViewController: NSViewController {
         if let globalSwipeMonitor {
             NSEvent.removeMonitor(globalSwipeMonitor)
         }
+        immersiveTeleportWorkItem?.cancel()
+        windowLevelPollingTimer?.invalidate()
         dynamicLayoutDebounceWorkItem?.cancel()
+    }
+
+    override var undoManager: UndoManager? {
+        actionUndoManager
     }
 
     override func loadView() {
         view = NSView(frame: NSRect(x: 0, y: 0, width: 1280, height: 820))
+        view.wantsLayer = true
+        view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         setupUI()
         wireActions()
         bootstrapDisplays()
+    }
+
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        installWindowLevelMonitorIfNeeded()
+        refreshGridWindowLevelForPointerMapping()
+    }
+
+    override func viewWillDisappear() {
+        super.viewWillDisappear()
+        teardownWindowLevelMonitor()
     }
 
     override func viewDidLayout() {
@@ -89,17 +110,6 @@ final class WorkspaceRootViewController: NSViewController {
     }
 
     private func setupUI() {
-        configureIconButton(addButton, symbolName: "plus", accessibilityLabel: "New Display")
-        configureIconButton(removeButton, symbolName: "xmark", accessibilityLabel: "Remove Display")
-
-        controlsStack.translatesAutoresizingMaskIntoConstraints = false
-        controlsStack.orientation = .horizontal
-        controlsStack.alignment = .centerY
-        controlsStack.spacing = 8
-        controlsStack.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
-        controlsStack.addArrangedSubview(addButton)
-        controlsStack.addArrangedSubview(removeButton)
-
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.drawsBackground = false
         scrollView.hasVerticalScroller = true
@@ -129,7 +139,7 @@ final class WorkspaceRootViewController: NSViewController {
         view.addSubview(tileStatusOverlay)
 
         NSLayoutConstraint.activate([
-            scrollView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 2),
+            scrollView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
@@ -144,53 +154,7 @@ final class WorkspaceRootViewController: NSViewController {
         ])
     }
 
-    func attachTitlebarControls(to window: NSWindow) {
-        if titlebarAccessoryController != nil {
-            return
-        }
-
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 84, height: 40))
-        container.translatesAutoresizingMaskIntoConstraints = false
-        controlsStack.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(controlsStack)
-        NSLayoutConstraint.activate([
-            controlsStack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            controlsStack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            controlsStack.centerYAnchor.constraint(equalTo: container.centerYAnchor, constant: 8),
-            container.heightAnchor.constraint(equalToConstant: 40),
-        ])
-
-        let accessory = NSTitlebarAccessoryViewController()
-        accessory.layoutAttribute = .right
-        accessory.fullScreenMinHeight = 40
-        accessory.view = container
-        window.addTitlebarAccessoryViewController(accessory)
-        titlebarAccessoryController = accessory
-    }
-
-    private func configureIconButton(_ button: NSButton, symbolName: String, accessibilityLabel: String) {
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.bezelStyle = .texturedRounded
-        button.controlSize = .regular
-        button.title = ""
-        button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: accessibilityLabel)
-        button.imagePosition = .imageOnly
-        button.toolTip = accessibilityLabel
-        button.contentTintColor = .labelColor
-        button.setAccessibilityLabel(accessibilityLabel)
-        NSLayoutConstraint.activate([
-            button.widthAnchor.constraint(equalToConstant: 28),
-            button.heightAnchor.constraint(equalToConstant: 28),
-        ])
-    }
-
     private func wireActions() {
-        addButton.target = self
-        addButton.action = #selector(handleNewDisplay)
-
-        removeButton.target = self
-        removeButton.action = #selector(handleRemoveFocused)
-
         workspaceStore.onDidChange = { [weak self] in
             self?.renderStore()
             self?.scheduleStateSave()
@@ -234,9 +198,25 @@ final class WorkspaceRootViewController: NSViewController {
             self.scheduleArrangementSync()
         }
 
+        gridView.onResizeBegin = { [weak self] _ in
+            self?.resizeUndoBaseline = self?.tileSizesSnapshot()
+        }
+
+        gridView.onResizeCommit = { [weak self] _ in
+            guard let self else { return }
+            guard let before = self.resizeUndoBaseline else { return }
+            self.resizeUndoBaseline = nil
+            let after = self.tileSizesSnapshot()
+            self.registerTileSizeUndo(from: before, to: after, actionName: "Resize Tiles")
+        }
+
         gridView.onReorderCommit = { [weak self] orderedIDs in
-            self?.workspaceStore.reorderWorkspaces(orderedIDs)
-            self?.scheduleArrangementSync()
+            guard let self else { return }
+            let previousOrder = self.workspaceStore.workspaces.map(\.id)
+            self.workspaceStore.reorderWorkspaces(orderedIDs)
+            let appliedOrder = self.workspaceStore.workspaces.map(\.id)
+            self.scheduleArrangementSync()
+            self.registerOrderUndo(from: previousOrder, to: appliedOrder, actionName: "Reorder Displays")
         }
 
         gridView.surfaceProvider = { [weak self] displayID in
@@ -286,6 +266,7 @@ final class WorkspaceRootViewController: NSViewController {
         previewWindowController.closeIfDisplayMissing(validDisplayIDs: validDisplayIDs)
         layoutGridDocumentView()
         updateMacroControls()
+        refreshGridWindowLevelForPointerMapping()
     }
 
     @objc
@@ -349,46 +330,29 @@ final class WorkspaceRootViewController: NSViewController {
     @objc
     private func handleNewDisplay() {
         let templateTileSize = workspaceStore.focusedWorkspace?.tileSize ?? workspaceStore.workspaces.first?.tileSize
-        let name = "\(nextVirtualIndex)"
-        nextVirtualIndex += 1
-        let profile = displayManager.mainDisplayProfile()
-
-        guard let descriptor = displayManager.createVirtualDisplay(
-            name: name,
-            width: profile.width,
-            height: profile.height,
-            hidpi: profile.hiDPI,
-            physicalSizeMM: profile.physicalSizeMM
+        guard let created = createVirtualWorkspace(
+            name: "\(nextVirtualIndex)",
+            tileSize: templateTileSize,
+            at: nil
         ) else {
             NSSound.beep()
             return
         }
-
-        workspaceStore.addWorkspace(from: descriptor)
-        if let templateTileSize,
-           let newWorkspaceID = workspaceStore.focusedWorkspaceID {
-            workspaceStore.resizeWorkspace(workspaceID: newWorkspaceID, tileSize: templateTileSize)
-        }
-        streamManager.configureStreams(for: currentDisplayDescriptors())
-        scheduleArrangementSync()
+        nextVirtualIndex += 1
+        registerUndoForCreate(workspaceID: created.id, actionName: "New Display")
     }
 
     @objc
     private func handleRemoveFocused() {
-        guard let focused = workspaceStore.focusedWorkspace else { return }
-        guard focused.kind == .virtual else {
+        guard let focused = workspaceStore.focusedWorkspace, focused.kind == .virtual else {
             NSSound.beep()
             return
         }
-
-        guard displayManager.removeVirtualDisplay(displayID: focused.displayID) else {
+        guard let removed = removeVirtualWorkspace(workspaceID: focused.id) else {
             NSSound.beep()
             return
         }
-
-        _ = workspaceStore.removeFocusedWorkspace()
-        streamManager.configureStreams(for: currentDisplayDescriptors())
-        scheduleArrangementSync()
+        registerUndoForDelete(removed: removed.workspace, index: removed.index, actionName: "Remove Display")
     }
 
     private func currentDisplayDescriptors() -> [DisplayDescriptor] {
@@ -414,14 +378,78 @@ final class WorkspaceRootViewController: NSViewController {
         handleRemoveFocused()
     }
 
-    func canRemoveSelectedDisplay() -> Bool {
-        guard !workspaceStore.selectedWorkspaceIDs.isEmpty else { return false }
-        guard let focused = workspaceStore.focusedWorkspace else { return false }
-        return focused.kind == .virtual
+    private struct DeletedWorkspaceSnapshot {
+        let title: String
+        let tileSize: CGSize
+        let index: Int
+    }
+
+    @discardableResult
+    private func createVirtualWorkspace(name: String, tileSize: CGSize?, at index: Int?) -> Workspace? {
+        let profile = displayManager.mainDisplayProfile()
+        guard let descriptor = displayManager.createVirtualDisplay(
+            name: name,
+            width: profile.width,
+            height: profile.height,
+            hidpi: profile.hiDPI,
+            physicalSizeMM: profile.physicalSizeMM
+        ) else {
+            return nil
+        }
+
+        let created = workspaceStore.addWorkspace(from: descriptor, tileSize: tileSize, at: index)
+        streamManager.configureStreams(for: currentDisplayDescriptors())
+        scheduleArrangementSync()
+        return created
+    }
+
+    @discardableResult
+    private func removeVirtualWorkspace(workspaceID: UUID) -> (workspace: Workspace, index: Int)? {
+        guard let workspace = workspaceStore.workspace(with: workspaceID),
+              workspace.kind == .virtual else {
+            return nil
+        }
+        guard displayManager.removeVirtualDisplay(displayID: workspace.displayID) else {
+            return nil
+        }
+        guard let removed = workspaceStore.removeWorkspace(id: workspaceID) else {
+            return nil
+        }
+        streamManager.configureStreams(for: currentDisplayDescriptors())
+        scheduleArrangementSync()
+        return removed
+    }
+
+    private func registerUndoForCreate(workspaceID: UUID, actionName: String) {
+        actionUndoManager.registerUndo(withTarget: self) { target in
+            guard let removed = target.removeVirtualWorkspace(workspaceID: workspaceID) else { return }
+            target.registerUndoForDelete(removed: removed.workspace, index: removed.index, actionName: actionName)
+        }
+        actionUndoManager.setActionName(actionName)
+    }
+
+    private func registerUndoForDelete(removed: Workspace, index: Int, actionName: String) {
+        let snapshot = DeletedWorkspaceSnapshot(
+            title: removed.title,
+            tileSize: removed.tileSize,
+            index: index
+        )
+        actionUndoManager.registerUndo(withTarget: self) { target in
+            guard let recreated = target.createVirtualWorkspace(
+                name: snapshot.title,
+                tileSize: snapshot.tileSize,
+                at: snapshot.index
+            ) else { return }
+            target.registerUndoForCreate(workspaceID: recreated.id, actionName: actionName)
+        }
+        actionUndoManager.setActionName(actionName)
     }
 
     func beginShutdown(completion: @escaping () -> Void) {
         setTileStatus("Cleaning up displays...")
+        immersiveTeleportWorkItem?.cancel()
+        immersiveTeleportWorkItem = nil
+        teardownWindowLevelMonitor()
         previewWindowController.closePreview()
         let snapshot = makeSnapshot()
         lifecycleQueue.async { [weak self] in
@@ -456,6 +484,59 @@ final class WorkspaceRootViewController: NSViewController {
         }
     }
 
+    private func installWindowLevelMonitorIfNeeded() {
+        guard windowLevelPollingTimer == nil else { return }
+        let timer = Timer(timeInterval: 0.12, repeats: true) { [weak self] _ in
+            self?.refreshGridWindowLevelForPointerMapping()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        windowLevelPollingTimer = timer
+    }
+
+    private func teardownWindowLevelMonitor() {
+        windowLevelPollingTimer?.invalidate()
+        windowLevelPollingTimer = nil
+        if let window = view.window {
+            setGridWindowFloating(false, window: window)
+        } else {
+            isGridWindowFloating = false
+        }
+    }
+
+    private func refreshGridWindowLevelForPointerMapping() {
+        guard let window = view.window else { return }
+
+        if previewWindowController.isPresenting || window.styleMask.contains(.fullScreen) {
+            setGridWindowFloating(false, window: window)
+            return
+        }
+
+        setGridWindowFloating(shouldFloatGridWindowForMappedPointer(), window: window)
+    }
+
+    private func shouldFloatGridWindowForMappedPointer() -> Bool {
+        let virtualWorkspaces = workspaceStore.workspaces.filter { $0.kind == .virtual }
+        guard !virtualWorkspaces.isEmpty else { return false }
+
+        for workspace in virtualWorkspaces {
+            guard let tileFrame = gridView.frameForWorkspaceInScreen(workspace.id) else { continue }
+            if pointerRouter.currentMouseMapsIntoTile(
+                fromDisplayID: workspace.displayID,
+                toTileScreenFrame: tileFrame
+            ) {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private func setGridWindowFloating(_ shouldFloat: Bool, window: NSWindow) {
+        guard shouldFloat != isGridWindowFloating else { return }
+        window.level = shouldFloat ? .floating : .normal
+        isGridWindowFloating = shouldFloat
+    }
+
     private func handleNavigationEvent(_ event: NSEvent) -> Bool {
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         applyTileLabelMode(modifiers: mods)
@@ -485,9 +566,11 @@ final class WorkspaceRootViewController: NSViewController {
             toggleTeleport()
             return true
         case .newDisplay:
+            guard isWorkspaceGridWindowFocused() else { return false }
             handleNewDisplay()
             return true
         case .removeDisplay:
+            guard isWorkspaceGridWindowFocused() else { return false }
             handleRemoveFocused()
             return true
         case .focusNext:
@@ -506,6 +589,11 @@ final class WorkspaceRootViewController: NSViewController {
             openFullscreenForFocusedWorkspace()
             return true
         }
+    }
+
+    private func isWorkspaceGridWindowFocused() -> Bool {
+        guard NSApp.isActive, let window = view.window else { return false }
+        return NSApp.keyWindow === window || NSApp.mainWindow === window
     }
 
     private func maybeHandleDoubleCommandTap(_ event: NSEvent) -> Bool {
@@ -676,9 +764,8 @@ final class WorkspaceRootViewController: NSViewController {
     }
 
     private func layoutGridDocumentView() {
-        let viewportSize = scrollView.contentView.bounds.size
-        let width = max(1.0, viewportSize.width)
-        let minHeight = max(1.0, viewportSize.height)
+        let width = tileLayoutViewportWidth()
+        let minHeight = max(1.0, scrollView.contentView.bounds.height)
         let neededHeight = max(minHeight, gridView.requiredContentHeight(forWidth: width))
 
         let newFrame = CGRect(x: 0, y: 0, width: width, height: neededHeight)
@@ -701,6 +788,7 @@ final class WorkspaceRootViewController: NSViewController {
 
     private func applyLayout(columns: Int) {
         guard !workspaceStore.workspaces.isEmpty else { return }
+        let before = tileSizesSnapshot()
 
         if shortcutManager.tileSizingMode == .dynamic {
             activeDynamicLayoutColumns = columns
@@ -716,10 +804,12 @@ final class WorkspaceRootViewController: NSViewController {
         )
         workspaceStore.setTileSizes(sizes)
         scheduleArrangementSync()
+        registerTileSizeUndo(from: before, to: tileSizesSnapshot(), actionName: "Layout")
     }
 
     private func applyFixedReasonableTileSizing() {
         guard !workspaceStore.workspaces.isEmpty else { return }
+        let before = tileSizesSnapshot()
         activeDynamicLayoutColumns = nil
         let sizes: [UUID: CGSize] = Dictionary(uniqueKeysWithValues:
             workspaceStore.workspaces.map { workspace in
@@ -728,11 +818,22 @@ final class WorkspaceRootViewController: NSViewController {
         )
         workspaceStore.setTileSizes(sizes)
         scheduleArrangementSync()
+        registerTileSizeUndo(from: before, to: tileSizesSnapshot(), actionName: "Resize Tiles")
     }
 
     private func openFullscreenForFocusedWorkspace() {
+        let now = ProcessInfo.processInfo.systemUptime
+        if now - lastImmersiveToggleTime < 0.16 {
+            return
+        }
+        lastImmersiveToggleTime = now
+
+        immersiveTeleportWorkItem?.cancel()
+        immersiveTeleportWorkItem = nil
+
         if previewWindowController.isPresenting {
             previewWindowController.closePreview()
+            refreshGridWindowLevelForPointerMapping()
             return
         }
 
@@ -742,10 +843,13 @@ final class WorkspaceRootViewController: NSViewController {
         }
 
         previewWindowController.presentImmersive(for: focused)
+        refreshGridWindowLevelForPointerMapping()
         pointerRouter.teleportToDisplay(displayID: focused.displayID)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+        let delayedTeleport = DispatchWorkItem { [weak self] in
             self?.pointerRouter.teleportToDisplay(displayID: focused.displayID)
         }
+        immersiveTeleportWorkItem = delayedTeleport
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: delayedTeleport)
     }
 
     private func refreshDynamicPresetLayoutForViewportIfNeeded() {
@@ -755,7 +859,7 @@ final class WorkspaceRootViewController: NSViewController {
             return
         }
 
-        let viewportWidth = max(1.0, scrollView.contentView.bounds.width)
+        let viewportWidth = tileLayoutViewportWidth()
         guard abs(viewportWidth - lastDynamicLayoutViewportWidth) > 1.0 else { return }
         lastDynamicLayoutViewportWidth = viewportWidth
 
@@ -766,6 +870,18 @@ final class WorkspaceRootViewController: NSViewController {
         )
         workspaceStore.setTileSizes(sizes)
         scheduleArrangementSync()
+    }
+
+    private func tileLayoutViewportWidth() -> CGFloat {
+        let baseWidth = max(1.0, scrollView.bounds.width)
+        guard scrollView.scrollerStyle == .legacy, scrollView.hasVerticalScroller else {
+            return baseWidth
+        }
+
+        // Keep layout width stable even if the legacy vertical scroller visibility toggles.
+        let controlSize = scrollView.verticalScroller?.controlSize ?? .regular
+        let scrollerWidth = NSScroller.scrollerWidth(for: controlSize, scrollerStyle: .legacy)
+        return max(1.0, baseWidth - scrollerWidth)
     }
 
     private func scheduleDynamicLayoutRefreshDuringLiveResize() {
@@ -779,6 +895,75 @@ final class WorkspaceRootViewController: NSViewController {
 
     private func applyTileLabelMode(modifiers: NSEvent.ModifierFlags) {
         gridView.showsDisplayIDs = modifiers.contains(.option)
+    }
+
+    private func tileSizesSnapshot() -> [UUID: CGSize] {
+        Dictionary(uniqueKeysWithValues: workspaceStore.workspaces.map { ($0.id, $0.tileSize) })
+    }
+
+    private func tileSizeSnapshotsEqual(_ lhs: [UUID: CGSize], _ rhs: [UUID: CGSize]) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        for (id, l) in lhs {
+            guard let r = rhs[id] else { return false }
+            if abs(l.width - r.width) > 0.5 || abs(l.height - r.height) > 0.5 {
+                return false
+            }
+        }
+        return true
+    }
+
+    private func registerTileSizeUndo(from before: [UUID: CGSize], to after: [UUID: CGSize], actionName: String) {
+        guard !tileSizeSnapshotsEqual(before, after) else { return }
+        actionUndoManager.registerUndo(withTarget: self) { target in
+            target.applyTileSizesWithUndo(
+                targetSizes: before,
+                inverseSizes: after,
+                actionName: actionName
+            )
+        }
+        actionUndoManager.setActionName(actionName)
+    }
+
+    private func applyTileSizesWithUndo(
+        targetSizes: [UUID: CGSize],
+        inverseSizes: [UUID: CGSize],
+        actionName: String
+    ) {
+        workspaceStore.setTileSizes(targetSizes)
+        scheduleArrangementSync()
+        actionUndoManager.registerUndo(withTarget: self) { target in
+            target.applyTileSizesWithUndo(
+                targetSizes: inverseSizes,
+                inverseSizes: targetSizes,
+                actionName: actionName
+            )
+        }
+        actionUndoManager.setActionName(actionName)
+    }
+
+    private func registerOrderUndo(from before: [UUID], to after: [UUID], actionName: String) {
+        guard before != after else { return }
+        actionUndoManager.registerUndo(withTarget: self) { target in
+            target.applyOrderWithUndo(
+                targetOrder: before,
+                inverseOrder: after,
+                actionName: actionName
+            )
+        }
+        actionUndoManager.setActionName(actionName)
+    }
+
+    private func applyOrderWithUndo(targetOrder: [UUID], inverseOrder: [UUID], actionName: String) {
+        workspaceStore.reorderWorkspaces(targetOrder)
+        scheduleArrangementSync()
+        actionUndoManager.registerUndo(withTarget: self) { target in
+            target.applyOrderWithUndo(
+                targetOrder: inverseOrder,
+                inverseOrder: targetOrder,
+                actionName: actionName
+            )
+        }
+        actionUndoManager.setActionName(actionName)
     }
 
     private func scheduleStateSave() {

@@ -35,8 +35,10 @@ final class WorkspaceGridView: NSView {
     }
 
     var onFocusRequest: ((UUID, CGPoint, CGRect, NSEvent.ModifierFlags) -> Void)?
+    var onResizeBegin: ((UUID) -> Void)?
     var onBackgroundClick: (() -> Void)?
     var onResizeRequest: ((UUID, CGSize) -> Void)?
+    var onResizeCommit: ((UUID) -> Void)?
     var onReorderCommit: (([UUID]) -> Void)?
     var onSwipeDown: (() -> Void)?
     var surfaceProvider: ((CGDirectDisplayID) -> IOSurface?)?
@@ -69,7 +71,7 @@ final class WorkspaceGridView: NSView {
     private var animateReflowNextSync = false
 
     private let horizontalPadding: CGFloat = 12.0
-    private let verticalPadding: CGFloat = 12.0
+    private let verticalPadding: CGFloat = 0.0
     private let spacing: CGFloat = 8.0
     private let tileCornerRadius: CGFloat = 2.0
     private let wrapTolerance: CGFloat = 0.5
@@ -164,6 +166,7 @@ final class WorkspaceGridView: NSView {
                 resizingWorkspaceID = workspace.id
                 resizeStartPoint = point
                 resizeStartSize = workspace.tileSize
+                onResizeBegin?(workspace.id)
                 return
             }
 
@@ -241,8 +244,9 @@ final class WorkspaceGridView: NSView {
 
     override func mouseUp(with event: NSEvent) {
         _ = event
-        if resizingWorkspaceID != nil {
+        if let resizeWorkspaceID = resizingWorkspaceID {
             resizingWorkspaceID = nil
+            onResizeCommit?(resizeWorkspaceID)
             return
         }
 
