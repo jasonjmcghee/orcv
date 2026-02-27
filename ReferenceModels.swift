@@ -15,6 +15,17 @@ struct ReferenceRegion: Hashable {
         self.normalizedTopLeftRect = ReferenceRegion.clamp(normalizedTopLeftRect)
     }
 
+    static func == (lhs: ReferenceRegion, rhs: ReferenceRegion) -> Bool {
+        lhs.normalizedTopLeftRect == rhs.normalizedTopLeftRect
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(normalizedTopLeftRect.origin.x)
+        hasher.combine(normalizedTopLeftRect.origin.y)
+        hasher.combine(normalizedTopLeftRect.size.width)
+        hasher.combine(normalizedTopLeftRect.size.height)
+    }
+
     private static func clamp(_ rect: CGRect) -> CGRect {
         let x = max(0, min(1, rect.origin.x.isFinite ? rect.origin.x : 0))
         let y = max(0, min(1, rect.origin.y.isFinite ? rect.origin.y : 0))
