@@ -22,7 +22,7 @@ jobs:
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
         run: |
           CERT_FILE=$(mktemp /tmp/cert.XXXXXX.p12)
-          KEYCHAIN_FILE=$(mktemp /tmp/keychain.XXXXXX.keychain-db)
+          KEYCHAIN_FILE="/tmp/build-$(uuidgen).keychain-db"
           KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
 
           echo "$MACOS_CERTIFICATE" | base64 --decode > "$CERT_FILE"
