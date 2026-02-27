@@ -7,12 +7,18 @@ struct PersistedWorkspaceState: Codable {
         var pixelHeight: Int
         var tileWidth: Double
         var tileHeight: Double
+        var canvasX: Double?
+        var canvasY: Double?
     }
 
     var version: Int
     var nextVirtualIndex: Int
     var focusedIndex: Int?
     var dynamicLayoutColumns: Int?
+    var layoutModeRawValue: String?
+    var canvasMagnification: Double?
+    var canvasOffsetX: Double?
+    var canvasOffsetY: Double?
     var workspaces: [WorkspaceEntry]
 }
 

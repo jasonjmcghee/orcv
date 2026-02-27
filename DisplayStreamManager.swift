@@ -78,7 +78,18 @@ final class DisplayStreamManager {
             stopStream(for: removeID)
         }
 
-        for (displayID, descriptor) in uniqueByDisplay where entries[displayID] == nil {
+        for (displayID, descriptor) in uniqueByDisplay {
+            let expectedWidth = Int(max(1.0, descriptor.pixelSize.width))
+            let expectedHeight = Int(max(1.0, descriptor.pixelSize.height))
+
+            if let existing = entries[displayID] {
+                if existing.width != expectedWidth || existing.height != expectedHeight {
+                    stopStream(for: displayID)
+                    startStream(for: descriptor, attempt: 0)
+                }
+                continue
+            }
+
             startStream(for: descriptor, attempt: 0)
         }
     }
@@ -100,12 +111,14 @@ final class DisplayStreamManager {
         let handler: CGDisplayFrameHandler = { [weak self] status, _, frameSurface, _ in
             guard let self else { return }
             guard status == 0, let frameSurface else { return }
+            let displayID = descriptor.displayID
+
             self.surfaceQueue.sync(flags: .barrier) {
-                self.latestSurfaces[descriptor.displayID] = frameSurface
+                self.latestSurfaces[displayID] = frameSurface
             }
 
             DispatchQueue.main.async {
-                self.onDisplayFrame?(descriptor.displayID, frameSurface)
+                self.onDisplayFrame?(displayID, frameSurface)
                 self.onFrame?()
             }
         }

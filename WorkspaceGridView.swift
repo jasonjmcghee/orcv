@@ -34,14 +34,31 @@ final class WorkspaceGridView: NSView {
         }
     }
 
+    var layoutMode: WorkspaceLayoutMode = .tile {
+        didSet {
+            guard oldValue != layoutMode else { return }
+            previewOrderIDs = nil
+            dragBaseOrderIDs = nil
+            dragFrame = nil
+            dragDidMove = false
+            needsLayout = true
+            needsDisplay = true
+            syncTileLayers()
+        }
+    }
+
     var onFocusRequest: ((UUID, CGPoint, CGRect, NSEvent.ModifierFlags) -> Void)?
     var onResizeBegin: ((UUID) -> Void)?
     var onBackgroundClick: (() -> Void)?
     var onResizeRequest: ((UUID, CGSize) -> Void)?
     var onResizeCommit: ((UUID) -> Void)?
     var onReorderCommit: (([UUID]) -> Void)?
+    var onCanvasMoveCommit: ((UUID, CGPoint) -> Void)?
     var onSwipeDown: (() -> Void)?
     var surfaceProvider: ((CGDirectDisplayID) -> IOSurface?)?
+    var referenceProvider: ((Workspace) -> SurfaceReference)?
+    var referenceSurfaceProvider: ((SurfaceReference) -> IOSurface?)?
+    var suppressPreviewRebinds = false
 
     private struct TileLayers {
         let root: CALayer
@@ -75,6 +92,8 @@ final class WorkspaceGridView: NSView {
     private let spacing: CGFloat = 8.0
     private let tileCornerRadius: CGFloat = 2.0
     private let wrapTolerance: CGFloat = 0.5
+    private let canvasDocumentSize = CGSize(width: 1_000_000, height: 1_000_000)
+    private let canvasWorldOffset = CGPoint(x: 500_000, y: 500_000)
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -114,6 +133,10 @@ final class WorkspaceGridView: NSView {
     }
 
     func requiredContentHeight(forWidth width: CGFloat) -> CGFloat {
+        if layoutMode == .canvas {
+            return max(220.0, canvasDocumentSize.height)
+        }
+
         let availableWidth = max(300.0, width - horizontalPadding * 2.0)
         var x = horizontalPadding
         var rowHeight: CGFloat = 0.0
@@ -134,6 +157,11 @@ final class WorkspaceGridView: NSView {
 
         totalHeight += rowHeight + verticalPadding
         return max(220.0, totalHeight)
+    }
+
+    func requiredContentWidth(forViewportWidth width: CGFloat) -> CGFloat {
+        guard layoutMode == .canvas else { return max(1.0, width) }
+        return max(width, canvasDocumentSize.width)
     }
 
     override func layout() {
@@ -225,7 +253,18 @@ final class WorkspaceGridView: NSView {
             width: initialFrame.width,
             height: initialFrame.height
         )
-        dragFrame = newFrame
+        let clampedFrame = CGRect(
+            x: max(0, newFrame.minX),
+            y: max(0, newFrame.minY),
+            width: newFrame.width,
+            height: newFrame.height
+        )
+        dragFrame = clampedFrame
+
+        if layoutMode == .canvas {
+            syncTileLayers()
+            return
+        }
 
         let reorderIndex = targetIndexForDrag(
             draggedID: draggedID,
@@ -263,7 +302,16 @@ final class WorkspaceGridView: NSView {
             needsDisplay = true
         }
 
-        guard dragDidMove, let previewOrderIDs else { return }
+        guard dragDidMove else { return }
+
+        if layoutMode == .canvas {
+            if let dragFrame {
+                onCanvasMoveCommit?(draggedID, canvasWorldOrigin(fromDocumentOrigin: dragFrame.origin))
+            }
+            return
+        }
+
+        guard let previewOrderIDs else { return }
         if previewOrderIDs.contains(draggedID) {
             onReorderCommit?(previewOrderIDs)
         }
@@ -288,6 +336,29 @@ final class WorkspaceGridView: NSView {
         tileFrames[workspaceID]
     }
 
+    func canvasInitialViewportOrigin(for viewportSize: CGSize) -> CGPoint {
+        let worldFrames = canvasWorldFrames(for: activeOrderIDs())
+        let documentBounds = CGRect(origin: .zero, size: canvasDocumentSize)
+        guard !worldFrames.isEmpty else {
+            return CGPoint(
+                x: max(0, min(canvasWorldOffset.x - viewportSize.width / 2.0, documentBounds.maxX - viewportSize.width)),
+                y: max(0, min(canvasWorldOffset.y - viewportSize.height / 2.0, documentBounds.maxY - viewportSize.height))
+            )
+        }
+
+        let minX = worldFrames.values.map(\.minX).min() ?? 0
+        let maxX = worldFrames.values.map(\.maxX).max() ?? 0
+        let minY = worldFrames.values.map(\.minY).min() ?? 0
+        let maxY = worldFrames.values.map(\.maxY).max() ?? 0
+        let worldCenter = CGPoint(x: (minX + maxX) / 2.0, y: (minY + maxY) / 2.0)
+        let docCenter = canvasDocumentPoint(fromWorldPoint: worldCenter)
+
+        return CGPoint(
+            x: max(0, min(docCenter.x - viewportSize.width / 2.0, documentBounds.maxX - viewportSize.width)),
+            y: max(0, min(docCenter.y - viewportSize.height / 2.0, documentBounds.maxY - viewportSize.height))
+        )
+    }
+
     func frameForWorkspaceInScreen(_ workspaceID: UUID) -> CGRect? {
         guard let window, let frame = tileFrames[workspaceID] else { return nil }
         let frameInWindow = convert(frame, to: nil)
@@ -299,7 +370,21 @@ final class WorkspaceGridView: NSView {
         CATransaction.setDisableActions(true)
         for workspace in workspaces {
             guard let layers = tileLayers[workspace.id] else { continue }
-            applyPreview(for: workspace, layers: layers)
+            if layers.preview.contents == nil {
+                applyPreview(for: workspace, layers: layers)
+            }
+        }
+        CATransaction.commit()
+    }
+
+    func refreshPreviews(for displayID: CGDirectDisplayID) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for workspace in workspaces where workspace.displayID == displayID {
+            guard let layers = tileLayers[workspace.id] else { continue }
+            if !suppressPreviewRebinds || layers.preview.contents == nil {
+                applyPreview(for: workspace, layers: layers)
+            }
         }
         CATransaction.commit()
     }
@@ -390,7 +475,9 @@ final class WorkspaceGridView: NSView {
             handlePath.addLine(to: CGPoint(x: handleRect.maxX - 3, y: handleRect.maxY - 3))
             layers.handle.path = handlePath
 
-            applyPreview(for: workspace, layers: layers)
+            if !suppressPreviewRebinds || layers.preview.contents == nil {
+                applyPreview(for: workspace, layers: layers)
+            }
         }
 
         updateReorderIndicator(hostLayer: hostLayer)
@@ -451,11 +538,15 @@ final class WorkspaceGridView: NSView {
     }
 
     private func applyPreview(for workspace: Workspace, layers: TileLayers) {
-        if let surface = surfaceProvider?(workspace.displayID) {
+        let reference = referenceProvider?(workspace) ?? SurfaceReference(displayID: workspace.displayID)
+        let surface = referenceSurfaceProvider?(reference) ?? surfaceProvider?(workspace.displayID)
+        if let surface {
             layers.preview.contents = surface
+            layers.preview.contentsRect = reference.region.layerContentsRect
             layers.preview.backgroundColor = NSColor.clear.cgColor
         } else {
             layers.preview.contents = nil
+            layers.preview.contentsRect = ReferenceRegion.fullDisplay.layerContentsRect
             let isFocused = workspace.id == focusedWorkspaceID
             layers.preview.backgroundColor = (isFocused
                 ? NSColor.controlAccentColor.withAlphaComponent(0.18)
@@ -517,11 +608,21 @@ final class WorkspaceGridView: NSView {
         return bestIndex
     }
 
-    private func layoutFrames(for orderIDs: [UUID]) -> [UUID: CGRect] {
+    private func layoutFrames(for orderIDs: [UUID], layoutWidth: CGFloat? = nil) -> [UUID: CGRect] {
+        switch layoutMode {
+        case .tile:
+            return tileLayoutFrames(for: orderIDs, layoutWidth: layoutWidth)
+        case .canvas:
+            return canvasLayoutFrames(for: orderIDs, layoutWidth: layoutWidth)
+        }
+    }
+
+    private func tileLayoutFrames(for orderIDs: [UUID], layoutWidth: CGFloat? = nil) -> [UUID: CGRect] {
         let byID = Dictionary(uniqueKeysWithValues: workspaces.map { ($0.id, $0) })
         var frames: [UUID: CGRect] = [:]
 
-        let availableWidth = max(300.0, bounds.width - horizontalPadding * 2.0)
+        let width = max(1.0, layoutWidth ?? bounds.width)
+        let availableWidth = max(300.0, width - horizontalPadding * 2.0)
         var x = horizontalPadding
         var y = bounds.height - verticalPadding
         var rowHeight: CGFloat = 0.0
@@ -551,7 +652,64 @@ final class WorkspaceGridView: NSView {
         return frames
     }
 
+    private func canvasLayoutFrames(for orderIDs: [UUID], layoutWidth: CGFloat? = nil) -> [UUID: CGRect] {
+        let worldFrames = canvasWorldFrames(for: orderIDs, layoutWidth: layoutWidth)
+        var frames: [UUID: CGRect] = [:]
+        for (workspaceID, worldFrame) in worldFrames {
+            let docOrigin = canvasDocumentPoint(fromWorldPoint: worldFrame.origin)
+            frames[workspaceID] = CGRect(origin: docOrigin, size: worldFrame.size)
+        }
+        return frames
+    }
+
+    private func canvasWorldFrames(for orderIDs: [UUID], layoutWidth: CGFloat? = nil) -> [UUID: CGRect] {
+        let byID = Dictionary(uniqueKeysWithValues: workspaces.map { ($0.id, $0) })
+        let fallbackOrigins = canvasFallbackOrigins(for: orderIDs, layoutWidth: layoutWidth)
+        var frames: [UUID: CGRect] = [:]
+
+        for workspaceID in orderIDs {
+            guard let workspace = byID[workspaceID] else { continue }
+            let worldOrigin = workspace.canvasOrigin ?? fallbackOrigins[workspaceID] ?? CGPoint(x: horizontalPadding, y: verticalPadding)
+            frames[workspaceID] = CGRect(origin: worldOrigin, size: workspace.tileSize)
+        }
+        return frames
+    }
+
+    private func canvasFallbackOrigins(for orderIDs: [UUID], layoutWidth: CGFloat?) -> [UUID: CGPoint] {
+        let byID = Dictionary(uniqueKeysWithValues: workspaces.map { ($0.id, $0) })
+        let width = max(1.0, layoutWidth ?? bounds.width)
+        let availableWidth = max(300.0, width - horizontalPadding * 2.0)
+        var origins: [UUID: CGPoint] = [:]
+
+        var x = horizontalPadding
+        var y = verticalPadding
+        var rowHeight: CGFloat = 0.0
+
+        for workspaceID in orderIDs {
+            guard let workspace = byID[workspaceID] else { continue }
+            let tileSize = workspace.tileSize
+
+            if x > horizontalPadding && x + tileSize.width > horizontalPadding + availableWidth + wrapTolerance {
+                x = horizontalPadding
+                y += rowHeight + spacing
+                rowHeight = 0.0
+            }
+
+            origins[workspaceID] = CGPoint(x: x, y: y)
+            x += tileSize.width + spacing
+            rowHeight = max(rowHeight, tileSize.height)
+        }
+
+        return origins
+    }
+
     private func updateReorderIndicator(hostLayer: CALayer) {
+        guard layoutMode == .tile else {
+            reorderTargetFrame = nil
+            reorderIndicatorLayer.isHidden = true
+            return
+        }
+
         guard let draggedID = dragWorkspaceID,
               dragDidMove,
               let targetFrame = tileFrames[draggedID] else {
@@ -588,5 +746,13 @@ final class WorkspaceGridView: NSView {
             targetHeight = max(minHeight, targetHeight)
         }
         return CGSize(width: targetHeight * ratio, height: targetHeight)
+    }
+
+    private func canvasWorldOrigin(fromDocumentOrigin origin: CGPoint) -> CGPoint {
+        CGPoint(x: origin.x - canvasWorldOffset.x, y: origin.y - canvasWorldOffset.y)
+    }
+
+    private func canvasDocumentPoint(fromWorldPoint point: CGPoint) -> CGPoint {
+        CGPoint(x: point.x + canvasWorldOffset.x, y: point.y + canvasWorldOffset.y)
     }
 }

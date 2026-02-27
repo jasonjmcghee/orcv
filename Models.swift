@@ -6,6 +6,11 @@ enum WorkspaceKind {
     case virtual
 }
 
+enum WorkspaceLayoutMode: String {
+    case tile
+    case canvas
+}
+
 struct DisplayDescriptor {
     let displayID: CGDirectDisplayID
     let title: String
@@ -20,4 +25,5 @@ struct Workspace {
     var kind: WorkspaceKind
     var displayPixelSize: CGSize
     var tileSize: CGSize
+    var canvasOrigin: CGPoint?
 }

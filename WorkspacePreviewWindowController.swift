@@ -6,13 +6,13 @@ import QuartzCore
 
 final class WorkspacePreviewWindowController: NSWindowController, NSWindowDelegate {
     private let previewView: DisplaySurfacePreviewView
-    private var activeDisplayID: CGDirectDisplayID?
+    private var activeReference: SurfaceReference?
     private var previousPresentationOptions: NSApplication.PresentationOptions?
     private var previousWindowLevel: NSWindow.Level?
     private var previousCollectionBehavior: NSWindow.CollectionBehavior?
 
-    init(surfaceProvider: @escaping (CGDirectDisplayID) -> IOSurface?) {
-        previewView = DisplaySurfacePreviewView(surfaceProvider: surfaceProvider)
+    init(referenceSurfaceProvider: @escaping (SurfaceReference) -> IOSurface?) {
+        previewView = DisplaySurfacePreviewView(referenceSurfaceProvider: referenceSurfaceProvider)
 
         let window = ImmersivePreviewWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 820),
@@ -38,21 +38,26 @@ final class WorkspacePreviewWindowController: NSWindowController, NSWindowDelega
     }
 
     var isPresenting: Bool {
-        activeDisplayID != nil
+        activeReference != nil
     }
 
     var presentedDisplayID: CGDirectDisplayID? {
-        activeDisplayID
+        guard let activeReference else { return nil }
+        switch activeReference.source {
+        case .display(let displayID):
+            return displayID
+        }
     }
 
-    func presentImmersive(for workspace: Workspace) {
+    func presentImmersive(for workspace: Workspace, on targetScreen: NSScreen?) {
         guard let window else { return }
 
-        activeDisplayID = workspace.displayID
-        previewView.displayID = workspace.displayID
+        let reference = SurfaceReference(displayID: workspace.displayID)
+        activeReference = reference
+        previewView.setReference(reference)
         window.title = workspace.title
 
-        if let targetScreen = NSScreen.main ?? window.screen ?? NSScreen.screens.first {
+        if let targetScreen = targetScreen ?? window.screen ?? NSScreen.screens.first {
             window.setFrame(targetScreen.frame, display: true)
             let scale = targetScreen.backingScaleFactor
             let frame = targetScreen.frame
@@ -83,8 +88,8 @@ final class WorkspacePreviewWindowController: NSWindowController, NSWindowDelega
         window.level = .floating
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        // Show above other windows without stealing key focus from the current app.
+        window.orderFrontRegardless()
         refresh()
     }
 
@@ -93,20 +98,22 @@ final class WorkspacePreviewWindowController: NSWindowController, NSWindowDelega
     }
 
     func consumeFrame(displayID: CGDirectDisplayID, surface: IOSurface) {
+        guard let activeReference else { return }
+        guard case .display(let activeDisplayID) = activeReference.source else { return }
         guard displayID == activeDisplayID else { return }
-        previewView.consumeFrame(surface)
+        previewView.consumeFrame(surface, for: activeReference)
     }
 
     func closeIfDisplayMissing(validDisplayIDs: Set<CGDirectDisplayID>) {
-        guard let activeDisplayID else { return }
+        guard let activeDisplayID = presentedDisplayID else { return }
         guard !validDisplayIDs.contains(activeDisplayID) else { return }
         closePreview()
     }
 
     func closePreview() {
         guard let window else {
-            activeDisplayID = nil
-            previewView.displayID = nil
+            activeReference = nil
+            previewView.setReference(nil)
             if let previousPresentationOptions {
                 NSApp.presentationOptions = previousPresentationOptions
                 self.previousPresentationOptions = nil
@@ -116,8 +123,8 @@ final class WorkspacePreviewWindowController: NSWindowController, NSWindowDelega
             return
         }
 
-        activeDisplayID = nil
-        previewView.displayID = nil
+        activeReference = nil
+        previewView.setReference(nil)
         window.orderOut(nil)
 
         if let previousWindowLevel {
@@ -147,19 +154,15 @@ private final class ImmersivePreviewWindow: NSWindow {
 }
 
 private final class DisplaySurfacePreviewView: NSView {
-    var displayID: CGDirectDisplayID? {
-        didSet {
-            refresh()
-        }
-    }
+    private var reference: SurfaceReference?
 
-    private let surfaceProvider: (CGDirectDisplayID) -> IOSurface?
+    private let referenceSurfaceProvider: (SurfaceReference) -> IOSurface?
 
     private let previewLayer = CALayer()
     private let statusLayer = CATextLayer()
 
-    init(surfaceProvider: @escaping (CGDirectDisplayID) -> IOSurface?) {
-        self.surfaceProvider = surfaceProvider
+    init(referenceSurfaceProvider: @escaping (SurfaceReference) -> IOSurface?) {
+        self.referenceSurfaceProvider = referenceSurfaceProvider
         super.init(frame: .zero)
 
         wantsLayer = true
@@ -209,28 +212,41 @@ private final class DisplaySurfacePreviewView: NSView {
         CATransaction.commit()
     }
 
+    func setReference(_ reference: SurfaceReference?) {
+        self.reference = reference
+        refresh()
+    }
+
     func refresh() {
-        guard let displayID else {
-            previewLayer.contents = nil
-            statusLayer.isHidden = false
-            statusLayer.string = "No display selected"
+        guard let reference else {
+            clearPreview(status: "No display selected", reference: nil)
             return
         }
 
-        if let surface = surfaceProvider(displayID) {
-            consumeFrame(surface)
+        if let surface = referenceSurfaceProvider(reference) {
+            consumeFrame(surface, for: reference)
         } else {
-            previewLayer.contents = nil
-            statusLayer.isHidden = false
-            statusLayer.string = "Waiting for frames"
+            clearPreview(status: "Waiting for frames", reference: reference)
         }
     }
 
-    func consumeFrame(_ surface: IOSurface) {
+    func consumeFrame(_ surface: IOSurface, for reference: SurfaceReference) {
+        guard self.reference == reference else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         previewLayer.contents = surface
+        previewLayer.contentsRect = reference.region.layerContentsRect
         CATransaction.commit()
         statusLayer.isHidden = true
+    }
+
+    private func clearPreview(status: String, reference: SurfaceReference?) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        previewLayer.contents = nil
+        previewLayer.contentsRect = reference?.region.layerContentsRect ?? ReferenceRegion.fullDisplay.layerContentsRect
+        CATransaction.commit()
+        statusLayer.isHidden = false
+        statusLayer.string = status
     }
 }

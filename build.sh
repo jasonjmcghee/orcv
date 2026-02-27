@@ -41,6 +41,7 @@ swiftc \
   "$ROOT_DIR/AppDelegate.swift" \
   "$ROOT_DIR/ScreenCaptureAuthorization.swift" \
   "$ROOT_DIR/Models.swift" \
+  "$ROOT_DIR/ReferenceModels.swift" \
   "$ROOT_DIR/ShortcutManager.swift" \
   "$ROOT_DIR/ShortcutSettingsWindowController.swift" \
   "$ROOT_DIR/WorkspaceStateStore.swift" \

@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private weak var macroToggleMenuItem: NSMenuItem?
     private weak var macroReplayMenuItem: NSMenuItem?
     private var terminateInProgress = false
+    private var didShowMainWindow = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         _ = notification
@@ -64,8 +65,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         root.onMacroStateDidChange = { [weak self] in
             self?.refreshMacroMenuItems()
         }
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        root.onInitialBootstrapComplete = { [weak self] in
+            self?.showMainWindowWhenReady()
+        }
         refreshMacroMenuItems()
     }
 
@@ -201,6 +203,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
         layoutMenu.addItem(.separator())
 
+        let tileModeItem = NSMenuItem(
+            title: "View Mode: Tile",
+            action: #selector(setViewModeTile(_:)),
+            keyEquivalent: ""
+        )
+        tileModeItem.target = self
+        layoutMenu.addItem(tileModeItem)
+
+        let canvasModeItem = NSMenuItem(
+            title: "View Mode: Canvas",
+            action: #selector(setViewModeCanvas(_:)),
+            keyEquivalent: ""
+        )
+        canvasModeItem.target = self
+        layoutMenu.addItem(canvasModeItem)
+
+        layoutMenu.addItem(.separator())
+
         let dynamicSizingItem = NSMenuItem(
             title: "Tile Size: Dynamic",
             action: #selector(setTileSizingDynamic(_:)),
@@ -306,6 +326,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     @objc
+    private func setViewModeTile(_ sender: Any?) {
+        _ = sender
+        rootViewController?.menuSetWorkspaceLayoutMode(.tile)
+    }
+
+    @objc
+    private func setViewModeCanvas(_ sender: Any?) {
+        _ = sender
+        rootViewController?.menuSetWorkspaceLayoutMode(.canvas)
+    }
+
+    @objc
     private func setTileSizingDynamic(_ sender: Any?) {
         _ = sender
         rootViewController?.menuSetTileSizingMode(.dynamic)
@@ -347,5 +379,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? {
         _ = window
         return rootViewController?.undoManager
+    }
+
+    private func showMainWindowWhenReady() {
+        guard !didShowMainWindow, let window else { return }
+        didShowMainWindow = true
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 }

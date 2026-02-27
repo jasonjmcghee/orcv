@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 final class WorkspaceStore {
@@ -15,7 +16,8 @@ final class WorkspaceStore {
                 title: descriptor.title,
                 kind: descriptor.kind,
                 displayPixelSize: descriptor.pixelSize,
-                tileSize: WorkspaceStore.defaultTileSize(for: descriptor.pixelSize)
+                tileSize: WorkspaceStore.defaultTileSize(for: descriptor.pixelSize),
+                canvasOrigin: nil
             )
         }
 
@@ -49,7 +51,8 @@ final class WorkspaceStore {
             title: descriptor.title,
             kind: descriptor.kind,
             displayPixelSize: descriptor.pixelSize,
-            tileSize: tileSize ?? WorkspaceStore.defaultTileSize(for: descriptor.pixelSize)
+            tileSize: tileSize ?? WorkspaceStore.defaultTileSize(for: descriptor.pixelSize),
+            canvasOrigin: nil
         )
 
         if let index {
@@ -157,6 +160,72 @@ final class WorkspaceStore {
         if changed {
             onDidChange?()
         }
+    }
+
+    func normalizeTileSizesForCurrentDisplays() {
+        guard !workspaces.isEmpty else { return }
+        var changed = false
+        for i in workspaces.indices {
+            let current = workspaces[i].tileSize
+            let pixel = workspaces[i].displayPixelSize
+            let ratio = max(0.1, pixel.width / max(1.0, pixel.height))
+            let minHeight = max(140.0, 220.0 / ratio)
+            let maxHeight = min(900.0, 1200.0 / ratio)
+            var targetHeight = current.height
+            if !targetHeight.isFinite || targetHeight <= 0 {
+                targetHeight = 360.0 / ratio
+            }
+            targetHeight = max(minHeight, min(maxHeight, targetHeight))
+            let normalized = CGSize(width: targetHeight * ratio, height: targetHeight)
+            if abs(current.width - normalized.width) > 0.5 || abs(current.height - normalized.height) > 0.5 {
+                workspaces[i].tileSize = normalized
+                changed = true
+            }
+        }
+        if changed {
+            onDidChange?()
+        }
+    }
+
+    func setCanvasOrigins(_ originsByWorkspaceID: [UUID: CGPoint]) {
+        guard !originsByWorkspaceID.isEmpty else { return }
+        var changed = false
+        for i in workspaces.indices {
+            guard let origin = originsByWorkspaceID[workspaces[i].id] else { continue }
+            if let current = workspaces[i].canvasOrigin {
+                if abs(current.x - origin.x) <= 0.5, abs(current.y - origin.y) <= 0.5 {
+                    continue
+                }
+            }
+            workspaces[i].canvasOrigin = origin
+            changed = true
+        }
+        if changed {
+            onDidChange?()
+        }
+    }
+
+    func updateCanvasOrigin(workspaceID: UUID, origin: CGPoint) {
+        guard let index = workspaces.firstIndex(where: { $0.id == workspaceID }) else { return }
+        if let current = workspaces[index].canvasOrigin {
+            if abs(current.x - origin.x) <= 0.5, abs(current.y - origin.y) <= 0.5 {
+                return
+            }
+        }
+        workspaces[index].canvasOrigin = origin
+        onDidChange?()
+    }
+
+    @discardableResult
+    func updateDisplayPixelSize(displayID: CGDirectDisplayID, pixelSize: CGSize) -> UUID? {
+        guard let index = workspaces.firstIndex(where: { $0.displayID == displayID }) else { return nil }
+        let current = workspaces[index].displayPixelSize
+        if abs(current.width - pixelSize.width) <= 0.5, abs(current.height - pixelSize.height) <= 0.5 {
+            return nil
+        }
+        workspaces[index].displayPixelSize = pixelSize
+        onDidChange?()
+        return workspaces[index].id
     }
 
     func reorderWorkspaces(_ orderedIDs: [UUID]) {
