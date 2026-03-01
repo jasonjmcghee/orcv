@@ -68,6 +68,24 @@ final class ShortcutSettingsWindowController: NSWindowController {
         refreshJumpToSlotModifierUI()
         refreshSavepointModifierUI()
         super.showWindow(sender)
+        centerWindowOnActiveScreen()
+    }
+
+    private func centerWindowOnActiveScreen() {
+        guard let window else { return }
+        let targetScreen = NSApp.keyWindow?.screen ?? NSScreen.main ?? NSScreen.screens.first
+        let visibleFrame = targetScreen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? window.screen?.visibleFrame
+        guard let visibleFrame else {
+            window.center()
+            return
+        }
+
+        let frame = window.frame
+        let origin = CGPoint(
+            x: visibleFrame.midX - frame.width / 2.0,
+            y: visibleFrame.midY - frame.height / 2.0
+        )
+        window.setFrameOrigin(origin)
     }
 
     private func buildUI() {
@@ -84,7 +102,7 @@ final class ShortcutSettingsWindowController: NSWindowController {
             root.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
         ])
 
-        let note = NSTextField(labelWithString: "Click Record, then press a shortcut. Double-tap a modifier for Cmd+Cmd / Shift+Shift style bindings. Modifier rows control zoom, jump/save digits, and scale-resize behavior.")
+        let note = NSTextField(labelWithString: "Click Record, then press a shortcut. Double-tap a modifier for Cmd+Cmd style bindings.")
         note.textColor = .secondaryLabelColor
         note.font = NSFont.systemFont(ofSize: 12)
         note.lineBreakMode = .byWordWrapping

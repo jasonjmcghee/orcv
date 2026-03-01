@@ -5,6 +5,10 @@ struct PersistedWorkspaceState: Codable {
         var magnification: Double
         var offsetX: Double
         var offsetY: Double
+        var windowX: Double?
+        var windowY: Double?
+        var windowWidth: Double?
+        var windowHeight: Double?
     }
 
     struct WorkspaceEntry: Codable {

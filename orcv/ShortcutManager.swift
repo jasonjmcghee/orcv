@@ -129,7 +129,7 @@ final class ShortcutManager {
     private var lastTapByModifier: [ShortcutModifier: TimeInterval] = [:]
     private var lastTapByKey: [KeyTapIdentity: TimeInterval] = [:]
     private let doubleTapInterval: TimeInterval = 0.45
-    private static let defaultScalingResizeModifier: ShortcutModifier? = .shift
+    private static let defaultScalingResizeModifier: ShortcutModifier? = .control
     private static let defaultZoomModifier: ShortcutModifier? = .command
     private static let defaultJumpToSlotModifier: ShortcutModifier? = .option
     private static let defaultSavepointModifier: ShortcutModifier? = .command
@@ -143,8 +143,18 @@ final class ShortcutManager {
         store = ShortcutStore(bundleIdentifier: bundleIdentifier)
         let loaded = store.load()
         let loadedBindings = loaded.bindings
-        scalingResizeModifier = Self.parseModifierToken(loaded.scalingResizeModifierToken)
-            ?? Self.defaultScalingResizeModifier
+        let loadedScalingToken = loaded.scalingResizeModifierToken?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        var didMigrateScalingResizeModifier = false
+        if loadedScalingToken == ShortcutModifier.shift.rawValue {
+            // Migrate old default away from Shift to avoid conflict with system aspect-lock resize.
+            scalingResizeModifier = .control
+            didMigrateScalingResizeModifier = true
+        } else {
+            scalingResizeModifier = Self.parseModifierToken(loaded.scalingResizeModifierToken)
+                ?? Self.defaultScalingResizeModifier
+        }
         zoomModifier = Self.parseModifierToken(loaded.zoomModifierToken)
             ?? Self.defaultZoomModifier
         jumpToSlotModifier = Self.parseModifierToken(loaded.jumpToSlotModifierToken)
@@ -185,7 +195,7 @@ final class ShortcutManager {
         }
         bindings = resolved
         compiled = Self.compile(bindings: resolved)
-        if didMigrateLegacyBinding {
+        if didMigrateLegacyBinding || didMigrateScalingResizeModifier {
             store.save(
                 bindings: bindings,
                 scalingResizeModifierToken: Self.modifierToken(from: scalingResizeModifier),

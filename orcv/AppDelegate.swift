@@ -10,9 +10,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var shortcutManager: ShortcutManager?
     private var shortcutsWindowController: ShortcutSettingsWindowController?
     private var aboutWindowController: OrcvAboutWindowController?
+    private var permissionsWindowController: PermissionGateWindowController?
     private var alwaysOnTopMenuItem: NSMenuItem?
     private var showDisplayIDsMenuItem: NSMenuItem?
     private var centerTileOnJumpMenuItem: NSMenuItem?
+    private var preserveSizeOnSlotJumpMenuItem: NSMenuItem?
+    private var restoreWindowFrameOnSavepointRecallMenuItem: NSMenuItem?
     private var swapResizeBehaviorMenuItem: NSMenuItem?
     private var terminateInProgress = false
     private var didShowMainWindow = false
@@ -21,9 +24,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         _ = notification
 
         installMainMenu()
+        evaluateLaunchPermissions()
+    }
 
-        let hasScreenCapture = ScreenCaptureAuthorization.requestIfNeeded()
+    func applicationDidBecomeActive(_ notification: Notification) {
+        _ = notification
+        guard rootViewController == nil else { return }
+        evaluateLaunchPermissions()
+    }
 
+    private func startMainApplication(hasScreenCaptureAccess: Bool) {
+        guard window == nil, rootViewController == nil else { return }
         let displayManager = VirtualDisplayManager()
         let workspaceStore = WorkspaceStore()
         let pointerRouter = PointerRouter()
@@ -38,7 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             pointerRouter: pointerRouter,
             shortcutManager: shortcutManager,
             stateStore: stateStore,
-            hasScreenCaptureAccess: hasScreenCapture
+            hasScreenCaptureAccess: hasScreenCaptureAccess
         )
 
         let window = NSWindow(
@@ -57,6 +68,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.isReleasedWhenClosed = false
         window.isRestorable = false
         window.animationBehavior = .none
+        var behavior = window.collectionBehavior
+        behavior.remove([.fullScreenPrimary, .fullScreenAllowsTiling])
+        window.collectionBehavior = behavior
         window.delegate = self
         window.contentViewController = root
         applyChromelessWindowStyle(window)
@@ -216,14 +230,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         viewMenu.addItem(alwaysOnTopItem)
 
         let showDisplayIDsItem = NSMenuItem(
-            title: "Show Display IDs",
+            title: "Show Display Indexes",
             action: #selector(toggleShowDisplayIDs(_:)),
             keyEquivalent: ""
         )
         showDisplayIDsItem.target = self
         showDisplayIDsItem.state = .off
         showDisplayIDsMenuItem = showDisplayIDsItem
-        viewMenu.addItem(showDisplayIDsItem)
 
         let centerTileOnJumpItem = NSMenuItem(
             title: "Center Tile on Jump",
@@ -234,6 +247,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         centerTileOnJumpItem.state = .off
         centerTileOnJumpMenuItem = centerTileOnJumpItem
         viewMenu.addItem(centerTileOnJumpItem)
+
+        let preserveSizeOnSlotJumpItem = NSMenuItem(
+            title: "Preserve View on Jump",
+            action: #selector(togglePreserveSizeOnSlotJump(_:)),
+            keyEquivalent: ""
+        )
+        preserveSizeOnSlotJumpItem.target = self
+        preserveSizeOnSlotJumpItem.state = .on
+        preserveSizeOnSlotJumpMenuItem = preserveSizeOnSlotJumpItem
+        viewMenu.addItem(preserveSizeOnSlotJumpItem)
+
+        let restoreWindowFrameOnSavepointRecallItem = NSMenuItem(
+            title: "Preserve Window Frame with Savepoint",
+            action: #selector(toggleRestoreWindowFrameOnSavepointRecall(_:)),
+            keyEquivalent: ""
+        )
+        restoreWindowFrameOnSavepointRecallItem.target = self
+        restoreWindowFrameOnSavepointRecallItem.state = .on
+        restoreWindowFrameOnSavepointRecallMenuItem = restoreWindowFrameOnSavepointRecallItem
+        viewMenu.addItem(restoreWindowFrameOnSavepointRecallItem)
 
         let swapResizeBehaviorItem = NSMenuItem(
             title: "Swap Resize Behavior",
@@ -265,7 +298,107 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         viewMenu.addItem(jumpToOriginItem)
         viewMenuItem.submenu = viewMenu
 
+        let developerMenuItem = NSMenuItem()
+        mainMenu.addItem(developerMenuItem)
+
+        let developerMenu = NSMenu(title: "Developer")
+        developerMenu.addItem(showDisplayIDsItem)
+        developerMenuItem.submenu = developerMenu
+
         NSApp.mainMenu = mainMenu
+    }
+
+    private struct LaunchPermissionState {
+        let hasAccessibility: Bool
+        let hasScreenCapture: Bool
+
+        var hasAllRequired: Bool {
+            hasAccessibility && hasScreenCapture
+        }
+    }
+
+    private func currentPermissionState() -> LaunchPermissionState {
+        LaunchPermissionState(
+            hasAccessibility: AccessibilityAuthorization.hasAccess(),
+            hasScreenCapture: ScreenCaptureAuthorization.hasAccess()
+        )
+    }
+
+    private func evaluateLaunchPermissions() {
+        let state = currentPermissionState()
+        if state.hasAllRequired {
+            permissionsWindowController?.close()
+            permissionsWindowController = nil
+            startMainApplication(hasScreenCaptureAccess: state.hasScreenCapture)
+            return
+        }
+        presentPermissionsWindow(state: state)
+    }
+
+    private func presentPermissionsWindow(state: LaunchPermissionState) {
+        if permissionsWindowController == nil {
+            permissionsWindowController = PermissionGateWindowController(
+                onRequestAccessibility: { [weak self] in
+                    self?.handleRequestAccessibilityPermission()
+                },
+                onOpenAccessibilitySettings: { [weak self] in
+                    self?.handleOpenAccessibilitySettings()
+                },
+                onRequestScreenCapture: { [weak self] in
+                    self?.handleRequestScreenCapturePermission()
+                },
+                onOpenScreenCaptureSettings: { [weak self] in
+                    self?.handleOpenScreenCaptureSettings()
+                },
+                onRefresh: { [weak self] in
+                    self?.evaluateLaunchPermissions()
+                },
+                onContinue: { [weak self] in
+                    self?.handleContinueFromPermissionsWindow()
+                }
+            )
+        }
+
+        permissionsWindowController?.updateStatus(
+            hasAccessibility: state.hasAccessibility,
+            hasScreenCapture: state.hasScreenCapture
+        )
+        permissionsWindowController?.showWindow(nil)
+        permissionsWindowController?.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func handleRequestAccessibilityPermission() {
+        _ = AccessibilityAuthorization.requestIfNeeded()
+        evaluateLaunchPermissions()
+    }
+
+    private func handleOpenAccessibilitySettings() {
+        AccessibilityAuthorization.openSystemSettings()
+        evaluateLaunchPermissions()
+    }
+
+    private func handleRequestScreenCapturePermission() {
+        _ = ScreenCaptureAuthorization.requestIfNeeded()
+        evaluateLaunchPermissions()
+    }
+
+    private func handleOpenScreenCaptureSettings() {
+        ScreenCaptureAuthorization.openSystemSettings()
+        evaluateLaunchPermissions()
+    }
+
+    private func handleContinueFromPermissionsWindow() {
+        let state = currentPermissionState()
+        guard state.hasAllRequired else {
+            permissionsWindowController?.updateStatus(
+                hasAccessibility: state.hasAccessibility,
+                hasScreenCapture: state.hasScreenCapture
+            )
+            NSSound.beep()
+            return
+        }
+        evaluateLaunchPermissions()
     }
 
     @objc
@@ -355,6 +488,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc
+    private func togglePreserveSizeOnSlotJump(_ sender: Any?) {
+        _ = sender
+        rootViewController?.menuTogglePreserveSizeOnSlotJump()
+        preserveSizeOnSlotJumpMenuItem?.state = rootViewController?.menuPreserveSizeOnSlotJumpEnabled() == true ? .on : .off
+    }
+
+    @objc
+    private func toggleRestoreWindowFrameOnSavepointRecall(_ sender: Any?) {
+        _ = sender
+        rootViewController?.menuToggleRestoreWindowFrameOnSavepointRecall()
+        restoreWindowFrameOnSavepointRecallMenuItem?.state = rootViewController?.menuRestoreWindowFrameOnSavepointRecallEnabled() == true ? .on : .off
+    }
+
+    @objc
     private func toggleSwapResizeBehavior(_ sender: Any?) {
         _ = sender
         rootViewController?.menuToggleSwapResizeBehavior()
@@ -391,6 +538,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         alwaysOnTopMenuItem?.state = rootViewController?.menuAlwaysOnTopEnabled() == true ? .on : .off
         showDisplayIDsMenuItem?.state = rootViewController?.menuShowDisplayIDsEnabled() == true ? .on : .off
         centerTileOnJumpMenuItem?.state = rootViewController?.menuCenterTileOnJumpEnabled() == true ? .on : .off
+        preserveSizeOnSlotJumpMenuItem?.state = rootViewController?.menuPreserveSizeOnSlotJumpEnabled() == true ? .on : .off
+        restoreWindowFrameOnSavepointRecallMenuItem?.state = rootViewController?.menuRestoreWindowFrameOnSavepointRecallEnabled() == true ? .on : .off
         swapResizeBehaviorMenuItem?.state = rootViewController?.menuSwapResizeBehaviorEnabled() == true ? .on : .off
         DispatchQueue.main.async { [weak self] in
             guard let window = self?.window else { return }
@@ -398,6 +547,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self?.alwaysOnTopMenuItem?.state = self?.rootViewController?.menuAlwaysOnTopEnabled() == true ? .on : .off
             self?.showDisplayIDsMenuItem?.state = self?.rootViewController?.menuShowDisplayIDsEnabled() == true ? .on : .off
             self?.centerTileOnJumpMenuItem?.state = self?.rootViewController?.menuCenterTileOnJumpEnabled() == true ? .on : .off
+            self?.preserveSizeOnSlotJumpMenuItem?.state = self?.rootViewController?.menuPreserveSizeOnSlotJumpEnabled() == true ? .on : .off
+            self?.restoreWindowFrameOnSavepointRecallMenuItem?.state = self?.rootViewController?.menuRestoreWindowFrameOnSavepointRecallEnabled() == true ? .on : .off
             self?.swapResizeBehaviorMenuItem?.state = self?.rootViewController?.menuSwapResizeBehaviorEnabled() == true ? .on : .off
         }
         NSApp.activate(ignoringOtherApps: true)
@@ -422,13 +573,295 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 }
 
+private final class PermissionGateWindowController: NSWindowController {
+    private let onRequestAccessibility: () -> Void
+    private let onOpenAccessibilitySettings: () -> Void
+    private let onRequestScreenCapture: () -> Void
+    private let onOpenScreenCaptureSettings: () -> Void
+    private let onRefresh: () -> Void
+    private let onContinue: () -> Void
+
+    private let accessibilityToggle = NSButton(checkboxWithTitle: "Accessibility", target: nil, action: nil)
+    private let screenCaptureToggle = NSButton(checkboxWithTitle: "Screen Recording", target: nil, action: nil)
+    private let statusLabel = NSTextField(labelWithString: "")
+    private let requestAccessibilityButton = NSButton(title: "Request", target: nil, action: nil)
+    private let openAccessibilitySettingsButton = NSButton(title: "Open Settings", target: nil, action: nil)
+    private let requestScreenCaptureButton = NSButton(title: "Request", target: nil, action: nil)
+    private let openScreenCaptureSettingsButton = NSButton(title: "Open Settings", target: nil, action: nil)
+    private let refreshButton = NSButton(title: "Refresh", target: nil, action: nil)
+    private let continueButton = NSButton(title: "Continue", target: nil, action: nil)
+
+    init(
+        onRequestAccessibility: @escaping () -> Void,
+        onOpenAccessibilitySettings: @escaping () -> Void,
+        onRequestScreenCapture: @escaping () -> Void,
+        onOpenScreenCaptureSettings: @escaping () -> Void,
+        onRefresh: @escaping () -> Void,
+        onContinue: @escaping () -> Void
+    ) {
+        self.onRequestAccessibility = onRequestAccessibility
+        self.onOpenAccessibilitySettings = onOpenAccessibilitySettings
+        self.onRequestScreenCapture = onRequestScreenCapture
+        self.onOpenScreenCaptureSettings = onOpenScreenCaptureSettings
+        self.onRefresh = onRefresh
+        self.onContinue = onContinue
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 440),
+            styleMask: [.titled, .closable, .miniaturizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Permissions Required"
+        window.isReleasedWhenClosed = false
+        window.tabbingMode = .disallowed
+        window.backgroundColor = .windowBackgroundColor
+
+        let root = NSView(frame: window.contentView?.bounds ?? .zero)
+        root.translatesAutoresizingMaskIntoConstraints = false
+        window.contentView = root
+
+        let iconView = NSImageView()
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        iconView.image = NSApp.applicationIconImage
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+
+        let titleLabel = NSTextField(labelWithString: "Allow Required Permissions")
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        titleLabel.font = NSFont.systemFont(ofSize: 26, weight: .semibold)
+        titleLabel.textColor = .labelColor
+        titleLabel.alignment = .center
+
+        let subtitleLabel = NSTextField(
+            wrappingLabelWithString: "orcv needs Accessibility and Screen Recording to control windows and show live display previews."
+        )
+        subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        subtitleLabel.font = NSFont.systemFont(ofSize: 13, weight: .regular)
+        subtitleLabel.textColor = .secondaryLabelColor
+        subtitleLabel.maximumNumberOfLines = 0
+        subtitleLabel.lineBreakMode = .byWordWrapping
+        subtitleLabel.alignment = .center
+
+        let accessibilitySection = Self.makePermissionSection(
+            toggle: accessibilityToggle,
+            description: "Required for shortcuts, focus navigation, and window control.",
+            requestButton: requestAccessibilityButton,
+            settingsButton: openAccessibilitySettingsButton
+        )
+        accessibilitySection.translatesAutoresizingMaskIntoConstraints = false
+
+        let screenCaptureSection = Self.makePermissionSection(
+            toggle: screenCaptureToggle,
+            description: "Required for live previews of your displays and tiles.",
+            requestButton: requestScreenCaptureButton,
+            settingsButton: openScreenCaptureSettingsButton
+        )
+        screenCaptureSection.translatesAutoresizingMaskIntoConstraints = false
+
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        statusLabel.font = NSFont.systemFont(ofSize: 12, weight: .regular)
+        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.alignment = .center
+        statusLabel.lineBreakMode = .byWordWrapping
+        statusLabel.maximumNumberOfLines = 0
+
+        refreshButton.translatesAutoresizingMaskIntoConstraints = false
+        refreshButton.bezelStyle = .rounded
+
+        continueButton.translatesAutoresizingMaskIntoConstraints = false
+        continueButton.bezelStyle = .rounded
+        continueButton.keyEquivalent = "\r"
+
+        let footerButtons = NSStackView(views: [refreshButton, continueButton])
+        footerButtons.translatesAutoresizingMaskIntoConstraints = false
+        footerButtons.orientation = .horizontal
+        footerButtons.alignment = .centerY
+        footerButtons.spacing = 10
+        footerButtons.distribution = .fillEqually
+
+        root.addSubview(iconView)
+        root.addSubview(titleLabel)
+        root.addSubview(subtitleLabel)
+        root.addSubview(accessibilitySection)
+        root.addSubview(screenCaptureSection)
+        root.addSubview(statusLabel)
+        root.addSubview(footerButtons)
+
+        NSLayoutConstraint.activate([
+            iconView.topAnchor.constraint(equalTo: root.topAnchor, constant: 18),
+            iconView.centerXAnchor.constraint(equalTo: root.centerXAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 56),
+            iconView.heightAnchor.constraint(equalToConstant: 56),
+
+            titleLabel.topAnchor.constraint(equalTo: iconView.bottomAnchor, constant: 10),
+            titleLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
+            titleLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
+
+            subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 8),
+            subtitleLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 24),
+            subtitleLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -24),
+
+            accessibilitySection.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 16),
+            accessibilitySection.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 24),
+            accessibilitySection.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -24),
+
+            screenCaptureSection.topAnchor.constraint(equalTo: accessibilitySection.bottomAnchor, constant: 12),
+            screenCaptureSection.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 24),
+            screenCaptureSection.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -24),
+
+            statusLabel.topAnchor.constraint(equalTo: screenCaptureSection.bottomAnchor, constant: 10),
+            statusLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 24),
+            statusLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -24),
+
+            footerButtons.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 12),
+            footerButtons.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 130),
+            footerButtons.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -130),
+            footerButtons.heightAnchor.constraint(equalToConstant: 30),
+            footerButtons.bottomAnchor.constraint(lessThanOrEqualTo: root.bottomAnchor, constant: -16),
+        ])
+
+        super.init(window: window)
+
+        requestAccessibilityButton.target = self
+        requestAccessibilityButton.action = #selector(requestAccessibility)
+        openAccessibilitySettingsButton.target = self
+        openAccessibilitySettingsButton.action = #selector(openAccessibilitySettings)
+        requestScreenCaptureButton.target = self
+        requestScreenCaptureButton.action = #selector(requestScreenCapture)
+        openScreenCaptureSettingsButton.target = self
+        openScreenCaptureSettingsButton.action = #selector(openScreenCaptureSettings)
+        refreshButton.target = self
+        refreshButton.action = #selector(refreshPermissions)
+        continueButton.target = self
+        continueButton.action = #selector(continueToApp)
+
+        updateStatus(hasAccessibility: false, hasScreenCapture: false)
+        window.center()
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    func updateStatus(hasAccessibility: Bool, hasScreenCapture: Bool) {
+        accessibilityToggle.state = hasAccessibility ? .on : .off
+        screenCaptureToggle.state = hasScreenCapture ? .on : .off
+
+        let missing = [
+            hasAccessibility ? nil : "Accessibility",
+            hasScreenCapture ? nil : "Screen Recording",
+        ].compactMap { $0 }
+
+        if missing.isEmpty {
+            statusLabel.stringValue = "All required permissions granted."
+            continueButton.isEnabled = true
+        } else {
+            statusLabel.stringValue = "Missing: \(missing.joined(separator: ", "))."
+            continueButton.isEnabled = false
+        }
+    }
+
+    @objc
+    private func requestAccessibility() {
+        onRequestAccessibility()
+    }
+
+    @objc
+    private func openAccessibilitySettings() {
+        onOpenAccessibilitySettings()
+    }
+
+    @objc
+    private func requestScreenCapture() {
+        onRequestScreenCapture()
+    }
+
+    @objc
+    private func openScreenCaptureSettings() {
+        onOpenScreenCaptureSettings()
+    }
+
+    @objc
+    private func refreshPermissions() {
+        onRefresh()
+    }
+
+    @objc
+    private func continueToApp() {
+        onContinue()
+    }
+
+    private static func makePermissionSection(
+        toggle: NSButton,
+        description: String,
+        requestButton: NSButton,
+        settingsButton: NSButton
+    ) -> NSView {
+        toggle.translatesAutoresizingMaskIntoConstraints = false
+        toggle.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        toggle.isEnabled = false
+
+        let descriptionLabel = NSTextField(wrappingLabelWithString: description)
+        descriptionLabel.translatesAutoresizingMaskIntoConstraints = false
+        descriptionLabel.font = NSFont.systemFont(ofSize: 12, weight: .regular)
+        descriptionLabel.textColor = .secondaryLabelColor
+        descriptionLabel.lineBreakMode = .byWordWrapping
+        descriptionLabel.maximumNumberOfLines = 0
+
+        requestButton.translatesAutoresizingMaskIntoConstraints = false
+        requestButton.bezelStyle = .rounded
+        requestButton.controlSize = .small
+
+        settingsButton.translatesAutoresizingMaskIntoConstraints = false
+        settingsButton.bezelStyle = .rounded
+        settingsButton.controlSize = .small
+
+        let buttonsStack = NSStackView(views: [requestButton, settingsButton])
+        buttonsStack.translatesAutoresizingMaskIntoConstraints = false
+        buttonsStack.orientation = .horizontal
+        buttonsStack.alignment = .centerY
+        buttonsStack.spacing = 8
+        buttonsStack.distribution = .fillEqually
+
+        let sectionContainer = NSView()
+        sectionContainer.translatesAutoresizingMaskIntoConstraints = false
+        sectionContainer.wantsLayer = true
+        sectionContainer.layer?.cornerRadius = 8
+        sectionContainer.layer?.borderWidth = 1
+        sectionContainer.layer?.borderColor = NSColor.separatorColor.cgColor
+        sectionContainer.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.4).cgColor
+
+        sectionContainer.addSubview(toggle)
+        sectionContainer.addSubview(descriptionLabel)
+        sectionContainer.addSubview(buttonsStack)
+
+        NSLayoutConstraint.activate([
+            toggle.topAnchor.constraint(equalTo: sectionContainer.topAnchor, constant: 10),
+            toggle.leadingAnchor.constraint(equalTo: sectionContainer.leadingAnchor, constant: 10),
+            toggle.trailingAnchor.constraint(equalTo: sectionContainer.trailingAnchor, constant: -10),
+
+            descriptionLabel.topAnchor.constraint(equalTo: toggle.bottomAnchor, constant: 4),
+            descriptionLabel.leadingAnchor.constraint(equalTo: sectionContainer.leadingAnchor, constant: 14),
+            descriptionLabel.trailingAnchor.constraint(equalTo: sectionContainer.trailingAnchor, constant: -14),
+
+            buttonsStack.topAnchor.constraint(equalTo: descriptionLabel.bottomAnchor, constant: 8),
+            buttonsStack.leadingAnchor.constraint(equalTo: sectionContainer.leadingAnchor, constant: 14),
+            buttonsStack.trailingAnchor.constraint(equalTo: sectionContainer.trailingAnchor, constant: -14),
+            buttonsStack.heightAnchor.constraint(equalToConstant: 24),
+            buttonsStack.bottomAnchor.constraint(equalTo: sectionContainer.bottomAnchor, constant: -10),
+        ])
+
+        return sectionContainer
+    }
+}
+
 private final class OrcvAboutWindowController: NSWindowController {
     private static let githubURL = URL(string: "https://github.com/jasonjmcghee/orcv")
-    private static let tagline = "orcv is a desktop control surface for running and supervising many visual tasks at once"
+    private static let tagline = "orcv is an infinite-desktop control surface for orchestrating many visual tasks at once"
 
     init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 400, height: 380),
+            contentRect: NSRect(x: 0, y: 0, width: 340, height: 380),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false

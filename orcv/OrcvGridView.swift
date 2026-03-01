@@ -34,6 +34,14 @@ final class OrcvGridView: NSView {
         }
     }
 
+    var displayIndexByDisplayID: [CGDirectDisplayID: Int] = [:] {
+        didSet {
+            guard oldValue != displayIndexByDisplayID else { return }
+            syncTileLayers()
+            needsDisplay = true
+        }
+    }
+
     var emptyStateCreateShortcutLabel: String = "Cmd+N" {
         didSet {
             guard oldValue != emptyStateCreateShortcutLabel else { return }
@@ -92,6 +100,7 @@ final class OrcvGridView: NSView {
         let root: CALayer
         let preview: CALayer
         let overlay: CALayer
+        let titleBackground: CALayer
         let title: CATextLayer
         let subtitle: CATextLayer
     }
@@ -117,6 +126,7 @@ final class OrcvGridView: NSView {
     private let spacing: CGFloat = 8.0
     private let tileCornerRadius: CGFloat = 2.0
     private let wrapTolerance: CGFloat = 0.5
+    private let displayIDFont = NSFont.systemFont(ofSize: 14, weight: .semibold)
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -392,7 +402,8 @@ final class OrcvGridView: NSView {
             CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeInEaseOut))
         }
 
-        for workspace in orderedWorkspaces() {
+        let ordered = orderedWorkspaces()
+        for workspace in ordered {
             guard let frame = tileFrames[workspace.id] else { continue }
             let layers = tileLayers[workspace.id] ?? makeTileLayers(hostLayer: hostLayer)
             tileLayers[workspace.id] = layers
@@ -412,11 +423,36 @@ final class OrcvGridView: NSView {
             layers.overlay.frame = layers.root.bounds
             layers.overlay.backgroundColor = NSColor.clear.cgColor
 
-            layers.title.frame = CGRect(x: 12, y: layers.root.bounds.height - 24, width: layers.root.bounds.width - 24, height: 18)
             if showsDisplayIDs {
-                layers.title.string = "\(workspace.displayID)"
+                let displayIndex = displayIndexByDisplayID[workspace.displayID] ?? 0
+                let text = displayIndex > 0 ? "\(displayIndex)" : "?"
+                let textSize = text.size(withAttributes: [.font: displayIDFont])
+                let badgePaddingX: CGFloat = 8.0
+                let badgePaddingY: CGFloat = 4.0
+                let badgeHeight = ceil(textSize.height + badgePaddingY * 2.0)
+                let badgeWidth = min(
+                    ceil(textSize.width + badgePaddingX * 2.0),
+                    max(10.0, layers.root.bounds.width - 24.0)
+                )
+                let badgeFrame = CGRect(
+                    x: max(12.0, layers.root.bounds.width - 12.0 - badgeWidth),
+                    y: max(8.0, layers.root.bounds.height - 12.0 - badgeHeight),
+                    width: badgeWidth,
+                    height: badgeHeight
+                )
+                layers.titleBackground.frame = badgeFrame
+                layers.titleBackground.isHidden = false
+
+                layers.title.frame = CGRect(
+                    x: badgeFrame.minX + badgePaddingX,
+                    y: badgeFrame.minY + ((badgeFrame.height - textSize.height) / 2.0) - 1.0,
+                    width: max(10.0, badgeFrame.width - badgePaddingX * 2.0),
+                    height: textSize.height + 2.0
+                )
+                layers.title.string = text
                 layers.title.isHidden = false
             } else {
+                layers.titleBackground.isHidden = true
                 layers.title.string = ""
                 layers.title.isHidden = true
             }
@@ -449,11 +485,16 @@ final class OrcvGridView: NSView {
         let overlay = CALayer()
         overlay.backgroundColor = NSColor.clear.cgColor
 
+        let titleBackground = CALayer()
+        titleBackground.backgroundColor = NSColor.black.withAlphaComponent(0.8).cgColor
+        titleBackground.cornerRadius = 7.0
+        titleBackground.isHidden = true
+
         let title = CATextLayer()
         title.contentsScale = NSScreen.main?.backingScaleFactor ?? 2.0
-        title.font = NSFont.systemFont(ofSize: 14, weight: .semibold)
-        title.fontSize = 14
-        title.foregroundColor = NSColor.labelColor.cgColor
+        title.font = displayIDFont
+        title.fontSize = displayIDFont.pointSize
+        title.foregroundColor = NSColor.white.cgColor
         title.alignmentMode = .left
 
         let subtitle = CATextLayer()
@@ -466,11 +507,19 @@ final class OrcvGridView: NSView {
 
         root.addSublayer(preview)
         root.addSublayer(overlay)
+        root.addSublayer(titleBackground)
         root.addSublayer(title)
         root.addSublayer(subtitle)
         hostLayer.addSublayer(root)
 
-        return TileLayers(root: root, preview: preview, overlay: overlay, title: title, subtitle: subtitle)
+        return TileLayers(
+            root: root,
+            preview: preview,
+            overlay: overlay,
+            titleBackground: titleBackground,
+            title: title,
+            subtitle: subtitle
+        )
     }
 
     private func applyPreview(for workspace: Workspace, layers: TileLayers) {

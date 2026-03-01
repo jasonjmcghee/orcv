@@ -159,12 +159,31 @@ final class WorkspacePreviewWindowController: NSWindowController, NSWindowDelega
 
     func windowDidResignKey(_ notification: Notification) {
         _ = notification
-        closePreview()
+        if shouldCloseOnResign() {
+            closePreview()
+        }
     }
 
     func windowDidResignMain(_ notification: Notification) {
         _ = notification
-        closePreview()
+        if shouldCloseOnResign() {
+            closePreview()
+        }
+    }
+
+    private func shouldCloseOnResign() -> Bool {
+        if NSEvent.pressedMouseButtons != 0 {
+            return false
+        }
+        guard let event = NSApp.currentEvent else { return true }
+        switch event.type {
+        case .leftMouseDown, .leftMouseUp, .leftMouseDragged,
+             .rightMouseDown, .rightMouseUp, .rightMouseDragged,
+             .otherMouseDown, .otherMouseUp, .otherMouseDragged:
+            return false
+        default:
+            return true
+        }
     }
 
 }

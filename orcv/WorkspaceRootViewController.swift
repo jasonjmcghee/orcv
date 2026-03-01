@@ -9,6 +9,11 @@ final class WorkspaceRootViewController: NSViewController {
         let origin: CGPoint
     }
 
+    private struct CanvasSavepoint {
+        let camera: CanvasCameraState
+        let windowFrame: CGRect?
+    }
+
     private let displayManager: VirtualDisplayManager
     private let workspaceStore: WorkspaceStore
     private let pointerRouter: PointerRouter
@@ -57,7 +62,7 @@ final class WorkspaceRootViewController: NSViewController {
     private var lastDisplayModeProbeTime: [CGDirectDisplayID: TimeInterval] = [:]
     private var currentLayoutMode: WorkspaceLayoutMode = .canvas
     private var lastCanvasCamera: CanvasCameraState?
-    private var canvasSavepoints: [Int: CanvasCameraState] = [:]
+    private var canvasSavepoints: [Int: CanvasSavepoint] = [:]
     private var isRestoringState = false
     private var isMaterializingCanvasOrigins = false
     private var lastObservedWindowFrame: CGRect?
@@ -74,6 +79,8 @@ final class WorkspaceRootViewController: NSViewController {
     private var alwaysOnTopEnabled = false
     private var showDisplayIDsEnabled = false
     private var centerTileOnJumpEnabled = false
+    private var preserveSizeOnSlotJumpEnabled = true
+    private var restoreWindowFrameOnSavepointRecallEnabled = true
     private var swapResizeBehaviorEnabled = false
     private var pendingScrollZoomDelta: CGFloat = 0.0
 
@@ -326,6 +333,7 @@ final class WorkspaceRootViewController: NSViewController {
 
     private func renderStore() {
         updateEmptyStateCallout()
+        gridView.displayIndexByDisplayID = displayManager.systemDisplayIndexByID()
         gridView.workspaces = workspaceStore.workspaces
         gridView.focusedWorkspaceID = workspaceStore.focusedWorkspaceID
         gridView.selectedWorkspaceIDs = workspaceStore.selectedWorkspaceIDs
@@ -591,6 +599,22 @@ final class WorkspaceRootViewController: NSViewController {
 
     func menuCenterTileOnJumpEnabled() -> Bool {
         centerTileOnJumpEnabled
+    }
+
+    func menuTogglePreserveSizeOnSlotJump() {
+        preserveSizeOnSlotJumpEnabled.toggle()
+    }
+
+    func menuPreserveSizeOnSlotJumpEnabled() -> Bool {
+        preserveSizeOnSlotJumpEnabled
+    }
+
+    func menuToggleRestoreWindowFrameOnSavepointRecall() {
+        restoreWindowFrameOnSavepointRecallEnabled.toggle()
+    }
+
+    func menuRestoreWindowFrameOnSavepointRecallEnabled() -> Bool {
+        restoreWindowFrameOnSavepointRecallEnabled
     }
 
     func menuToggleSwapResizeBehavior() {
@@ -1168,6 +1192,9 @@ final class WorkspaceRootViewController: NSViewController {
     private func handleNavigationEvent(_ event: NSEvent) -> Bool {
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let shortcutMods = mods.intersection([.control, .option, .command, .shift])
+        if event.type == .keyDown, event.keyCode == 49, isOrcvWindowFocused() {
+            return true
+        }
         if event.type == .keyDown {
             if let slot = digitSlotForNavigationEvent(event) {
                 if shortcutManager.matchesJumpToSlotModifier(shortcutMods), (1...9).contains(slot) {
@@ -1274,6 +1301,9 @@ final class WorkspaceRootViewController: NSViewController {
             return
         }
         if previewWindowController.isPresenting || previewWindowController.window?.isVisible == true {
+            immersiveTeleportWorkItem?.cancel()
+            immersiveTeleportWorkItem = nil
+            teleportBackFromPresentedPreviewIfNeeded()
             previewWindowController.closePreview()
             returnFocusToOrcvWindow()
             suppressTeleportUntil = now + 0.45
@@ -1315,6 +1345,49 @@ final class WorkspaceRootViewController: NSViewController {
             tileFrameInWindow: hit.frameInGrid
         )
         scheduleArrangementSync()
+    }
+
+    private func teleportBackFromPresentedPreviewIfNeeded() {
+        guard let displayID = previewWindowController.presentedDisplayID else {
+            teleportToOrcvWindowDisplayCenter()
+            return
+        }
+
+        if let workspace = workspaceStore.workspaces.first(where: { $0.displayID == displayID }),
+           let tileFrame = gridView.frameForWorkspaceInScreen(workspace.id) {
+            pointerRouter.teleportBack(
+                fromDisplayID: displayID,
+                toTileScreenFrame: tileFrame
+            )
+        }
+
+        if isMouseOnDisplay(displayID) {
+            teleportToOrcvWindowDisplayCenter()
+        }
+    }
+
+    private func isMouseOnDisplay(_ displayID: CGDirectDisplayID) -> Bool {
+        guard let mouseQuartz = CGEvent(source: nil)?.location else { return false }
+        return displayIDs(at: mouseQuartz).contains(displayID)
+    }
+
+    private func teleportToOrcvWindowDisplayCenter() {
+        if let screen = view.window?.screen,
+           let displayID = displayID(for: screen) {
+            pointerRouter.teleportToDisplay(displayID: displayID)
+            return
+        }
+        if let fallbackScreen = NSScreen.main ?? NSScreen.screens.first,
+           let displayID = displayID(for: fallbackScreen) {
+            pointerRouter.teleportToDisplay(displayID: displayID)
+        }
+    }
+
+    private func displayID(for screen: NSScreen) -> CGDirectDisplayID? {
+        guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+            return nil
+        }
+        return CGDirectDisplayID(number.uint32Value)
     }
 
     private func workspaceUnderCurrentMouseDisplay() -> Workspace? {
@@ -1535,32 +1608,61 @@ final class WorkspaceRootViewController: NSViewController {
         }
         lastImmersiveToggleTime = now
 
-        guard let hovered = hoveredWorkspaceForFullscreen() else {
+        guard let target = hoveredWorkspaceTargetForFullscreen() else {
             NSSound.beep()
             return
         }
 
-        previewWindowController.presentImmersive(for: hovered, on: view.window?.screen)
+        previewWindowController.presentImmersive(for: target.workspace, on: view.window?.screen)
         refreshGridWindowLevelForPointerMapping()
-        pointerRouter.teleportToDisplay(displayID: hovered.displayID)
+        pointerRouter.teleportToDisplay(displayID: target.workspace.displayID, normalized: target.normalizedPoint)
         let delayedTeleport = DispatchWorkItem { [weak self] in
-            self?.pointerRouter.teleportToDisplay(displayID: hovered.displayID)
+            self?.pointerRouter.teleportToDisplay(
+                displayID: target.workspace.displayID,
+                normalized: target.normalizedPoint
+            )
         }
         immersiveTeleportWorkItem = delayedTeleport
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: delayedTeleport)
     }
 
-    private func hoveredWorkspaceForFullscreen() -> Workspace? {
+    private struct FullscreenTarget {
+        let workspace: Workspace
+        let normalizedPoint: CGPoint
+    }
+
+    private func hoveredWorkspaceTargetForFullscreen() -> FullscreenTarget? {
         guard let window = view.window else { return nil }
         let mouseInScreen = NSEvent.mouseLocation
-        let pointInWindow = window.convertPoint(fromScreen: mouseInScreen)
-        let pointInGrid = gridView.convert(pointInWindow, from: nil)
-        guard let hit = gridView.hitTestWorkspace(at: pointInGrid),
-              let workspace = workspaceStore.workspace(with: hit.workspaceID),
-              workspace.kind == .virtual else {
+        if isPointerDirectlyOverWindow(window: window, screenPoint: mouseInScreen) {
+            let pointInWindow = window.convertPoint(fromScreen: mouseInScreen)
+            let pointInGrid = gridView.convert(pointInWindow, from: nil)
+            guard let hit = gridView.hitTestWorkspace(at: pointInGrid),
+                  let workspace = workspaceStore.workspace(with: hit.workspaceID),
+                  workspace.kind == .virtual else {
+                return nil
+            }
+            let tileRect = CGRect(origin: .zero, size: hit.frameInGrid.size)
+            let normalizedPoint = PointerMath.normalizedPoint(
+                for: hit.pointInTile,
+                in: tileRect,
+                sourceYFlipped: false
+            ) ?? CGPoint(x: 0.5, y: 0.5)
+            return FullscreenTarget(workspace: workspace, normalizedPoint: normalizedPoint)
+        }
+
+        guard let workspace = workspaceUnderCurrentMouseDisplay(),
+              workspace.kind == .virtual,
+              let mouseQuartz = CGEvent(source: nil)?.location else {
             return nil
         }
-        return workspace
+        let displayBounds = CGDisplayBounds(workspace.displayID)
+        let normalizedPoint = PointerMath.normalizedPoint(
+            for: mouseQuartz,
+            in: displayBounds,
+            sourceYFlipped: true
+        ) ?? CGPoint(x: 0.5, y: 0.5)
+        return FullscreenTarget(workspace: workspace, normalizedPoint: normalizedPoint)
     }
 
     private func maybeRefreshDisplayPixelSizeFromSystem(displayID: CGDirectDisplayID, surface: IOSurface) {
@@ -1637,12 +1739,14 @@ final class WorkspaceRootViewController: NSViewController {
         let workspaces = workspaceStore.workspaces
         let index = slot - 1
         guard index >= 0, index < workspaces.count else { return false }
+        let sourceWorkspaceID = workspaceStore.focusedWorkspaceID
         let target = workspaces[index]
         workspaceStore.selectOnly(workspaceID: target.id)
         return jumpCameraToWorkspace(
             workspaceID: target.id,
-            fitWidth: true,
-            alignTopLeft: !centerTileOnJumpEnabled
+            fitWidth: !preserveSizeOnSlotJumpEnabled,
+            alignTopLeft: !centerTileOnJumpEnabled,
+            preserveViewportOffsetFromWorkspaceID: preserveSizeOnSlotJumpEnabled ? sourceWorkspaceID : nil
         )
     }
 
@@ -1651,6 +1755,7 @@ final class WorkspaceRootViewController: NSViewController {
         guard !workspaces.isEmpty else { return false }
         guard step != 0 else { return false }
 
+        let sourceWorkspaceID = workspaceStore.focusedWorkspaceID
         let currentIndex = workspaceStore.focusedWorkspaceID
             .flatMap { focusedID in workspaces.firstIndex(where: { $0.id == focusedID }) } ?? 0
         let count = workspaces.count
@@ -1659,12 +1764,18 @@ final class WorkspaceRootViewController: NSViewController {
         workspaceStore.selectOnly(workspaceID: target.id)
         return jumpCameraToWorkspace(
             workspaceID: target.id,
-            fitWidth: true,
-            alignTopLeft: !centerTileOnJumpEnabled
+            fitWidth: !preserveSizeOnSlotJumpEnabled,
+            alignTopLeft: !centerTileOnJumpEnabled,
+            preserveViewportOffsetFromWorkspaceID: preserveSizeOnSlotJumpEnabled ? sourceWorkspaceID : nil
         )
     }
 
-    private func jumpCameraToWorkspace(workspaceID: UUID, fitWidth: Bool, alignTopLeft: Bool = false) -> Bool {
+    private func jumpCameraToWorkspace(
+        workspaceID: UUID,
+        fitWidth: Bool,
+        alignTopLeft: Bool = false,
+        preserveViewportOffsetFromWorkspaceID: UUID? = nil
+    ) -> Bool {
         guard currentLayoutMode == .canvas else { return false }
         layoutGridDocumentView()
         view.layoutSubtreeIfNeeded()
@@ -1681,7 +1792,18 @@ final class WorkspaceRootViewController: NSViewController {
         }
         let safeMag = max(minCanvasMagnification, min(maxCanvasMagnification, magnification))
         let newOrigin: CGPoint
-        if alignTopLeft {
+        if !fitWidth,
+           let sourceWorkspaceID = preserveViewportOffsetFromWorkspaceID,
+           let sourceFrame = gridView.frameForWorkspaceInWorld(sourceWorkspaceID) {
+            let relativeOffset = CGPoint(
+                x: gridView.cameraOrigin.x - sourceFrame.minX,
+                y: gridView.cameraOrigin.y - sourceFrame.minY
+            )
+            newOrigin = CGPoint(
+                x: worldFrame.minX + relativeOffset.x,
+                y: worldFrame.minY + relativeOffset.y
+            )
+        } else if alignTopLeft {
             newOrigin = CGPoint(
                 x: worldFrame.minX,
                 y: worldFrame.maxY - viewport.height / safeMag
@@ -1728,16 +1850,32 @@ final class WorkspaceRootViewController: NSViewController {
         guard let camera = (currentLayoutMode == .canvas ? currentCanvasCameraState() : nil)
             ?? lastCanvasCamera
             ?? defaultCanvasCameraState() else { return false }
-        canvasSavepoints[slot] = camera
+        let savepoint = CanvasSavepoint(
+            camera: camera,
+            windowFrame: view.window?.frame
+        )
+        canvasSavepoints[slot] = savepoint
         lastCanvasCamera = camera
         scheduleStateSave()
         return true
     }
 
     private func recallCanvasSavepoint(slot: Int) -> Bool {
-        guard (0...9).contains(slot), let camera = canvasSavepoints[slot] else { return false }
-        lastCanvasCamera = camera
-        applyCanvasCamera(camera)
+        guard (0...9).contains(slot), let savepoint = canvasSavepoints[slot] else { return false }
+
+        if restoreWindowFrameOnSavepointRecallEnabled,
+           let window = view.window,
+           let targetFrame = savepoint.windowFrame {
+            suppressWindowResizeUndoRegistration = true
+            suppressProgrammaticWindowResizeCameraAdjustment = true
+            window.setFrame(targetFrame, display: true, animate: false)
+            lastObservedWindowFrame = targetFrame
+            suppressProgrammaticWindowResizeCameraAdjustment = false
+            suppressWindowResizeUndoRegistration = false
+        }
+
+        lastCanvasCamera = savepoint.camera
+        applyCanvasCamera(savepoint.camera)
         scheduleStateSave()
         return true
     }
@@ -1753,28 +1891,47 @@ final class WorkspaceRootViewController: NSViewController {
     private func persistedCanvasSavepoints() -> [String: PersistedWorkspaceState.CameraBookmark]? {
         guard !canvasSavepoints.isEmpty else { return nil }
         var encoded: [String: PersistedWorkspaceState.CameraBookmark] = [:]
-        for (slot, camera) in canvasSavepoints where (0...9).contains(slot) {
+        for (slot, savepoint) in canvasSavepoints where (0...9).contains(slot) {
+            let frame = savepoint.windowFrame
             encoded[String(slot)] = PersistedWorkspaceState.CameraBookmark(
-                magnification: Double(camera.magnification),
-                offsetX: Double(camera.origin.x),
-                offsetY: Double(camera.origin.y)
+                magnification: Double(savepoint.camera.magnification),
+                offsetX: Double(savepoint.camera.origin.x),
+                offsetY: Double(savepoint.camera.origin.y),
+                windowX: frame.map { Double($0.origin.x) },
+                windowY: frame.map { Double($0.origin.y) },
+                windowWidth: frame.map { Double($0.size.width) },
+                windowHeight: frame.map { Double($0.size.height) }
             )
         }
         return encoded.isEmpty ? nil : encoded
     }
 
-    private func restoredCanvasSavepoints(from persisted: PersistedWorkspaceState) -> [Int: CanvasCameraState] {
+    private func restoredCanvasSavepoints(from persisted: PersistedWorkspaceState) -> [Int: CanvasSavepoint] {
         guard let raw = persisted.canvasSavepoints, !raw.isEmpty else { return [:] }
-        var decoded: [Int: CanvasCameraState] = [:]
+        var decoded: [Int: CanvasSavepoint] = [:]
         for (slotKey, bookmark) in raw {
             guard let slot = Int(slotKey), (0...9).contains(slot) else { continue }
             let magnification = CGFloat(bookmark.magnification)
             let x = CGFloat(bookmark.offsetX)
             let y = CGFloat(bookmark.offsetY)
             guard magnification.isFinite, magnification > 0, x.isFinite, y.isFinite else { continue }
-            decoded[slot] = CanvasCameraState(
+            let windowFrame: CGRect?
+            if let wx = bookmark.windowX,
+               let wy = bookmark.windowY,
+               let ww = bookmark.windowWidth,
+               let wh = bookmark.windowHeight,
+               wx.isFinite, wy.isFinite, ww.isFinite, wh.isFinite, ww > 1, wh > 1 {
+                windowFrame = CGRect(x: wx, y: wy, width: ww, height: wh)
+            } else {
+                windowFrame = nil
+            }
+            let camera = CanvasCameraState(
                 magnification: magnification,
                 origin: CGPoint(x: x, y: y)
+            )
+            decoded[slot] = CanvasSavepoint(
+                camera: camera,
+                windowFrame: windowFrame
             )
         }
         return decoded
@@ -1936,7 +2093,7 @@ final class WorkspaceRootViewController: NSViewController {
         let focusedWorkspaceID: UUID?
         let nextVirtualIndex: Int
         let canvasCamera: CanvasCameraState?
-        let canvasSavepoints: [Int: CanvasCameraState]
+        let canvasSavepoints: [Int: CanvasSavepoint]
     }
 
     private func buildBootstrapState() -> BootstrapState {
