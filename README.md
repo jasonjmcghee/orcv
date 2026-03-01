@@ -1,12 +1,10 @@
 # <img src="./orcv/Assets.xcassets/AppIcon.appiconset/icon_128x128.png" width="64" height="64" align="center"> orcv
 
-orcv (ork-vee) is a macos app that lets you create virtual displays in an infinite canvas (zoom/pan), arrange them, create "savepoints", teleport windows or your mouse to or from them, or fullscreen one, all in a picture-in-picture style overlay you can keep on your main display.
+orcv (ork-vee) is a macos app that lets you create virtual displays in an infinite canvas (zoom/pan), arrange them, create "savepoints" and rapidly jump between them, teleport windows or your mouse to or from them, or fullscreen one, all in a picture-in-picture style overlay you can keep on your main display.
 
 _These are real / recognized displays by macos, which are automatically arranged based on how you arrange them in the canvas, just like if you had a bunch of monitors on your desk._
 
-<img width="896" height="559" alt="Screenshot 2026-03-01 at 2 40 12 PM" src="https://github.com/user-attachments/assets/f6e084dd-71a0-45a8-bd29-957302cae525" />
-
-_Yes this is a screenshot of me deciding I wanted a recursive screenshot._
+<img width="896" height="566" alt="Screenshot 2026-03-01 at 2 48 54 PM" src="https://github.com/user-attachments/assets/5c5096bd-c0b4-4ebe-b548-394c814d9f9d" />
 
 In today's world, long-running tasks that you have to manage have visual aspects. That doesn't work well with the terminal. tmux and Zellij and friends have a lot of great attributes, but I had yet to use something that checked all my boxes.
 
