@@ -10,7 +10,7 @@ enum ShortcutAction: String, CaseIterable {
     case jumpPreviousDisplay = "jump_previous_display"
     case windowFollowHold = "window_follow_hold"
     case deselectTile = "deselect_tile"
-    case minimizeWindow = "minimize_window"
+    case hideWindow = "hide_window"
     case navigateBack = "navigate_back"
     case navigateForward = "navigate_forward"
 
@@ -24,7 +24,7 @@ enum ShortcutAction: String, CaseIterable {
         case .jumpPreviousDisplay: return "Jump Previous Display"
         case .windowFollowHold: return "Window Follow (Hold)"
         case .deselectTile: return "Deselect Tile"
-        case .minimizeWindow: return "Minimize"
+        case .hideWindow: return "Hide Window"
         case .navigateBack: return "Navigate Back"
         case .navigateForward: return "Navigate Forward"
         }
@@ -40,7 +40,7 @@ enum ShortcutAction: String, CaseIterable {
         case .jumpPreviousDisplay: return "shift+tab"
         case .windowFollowHold: return "space"
         case .deselectTile: return "backspace"
-        case .minimizeWindow: return "cmd+m"
+        case .hideWindow: return "cmd+h"
         case .navigateBack: return "cmd+["
         case .navigateForward: return "cmd+]"
         }

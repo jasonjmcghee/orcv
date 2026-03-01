@@ -18,7 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var restoreWindowFrameOnSavepointRecallMenuItem: NSMenuItem?
     private var swapResizeBehaviorMenuItem: NSMenuItem?
     private var sharpCornersMenuItem: NSMenuItem?
-    private var minimizeMenuItem: NSMenuItem?
+    private var windowVisibilityMenuItem: NSMenuItem?
     private var autoArrangeOffItem: NSMenuItem?
     private var autoArrangeColumnItem: NSMenuItem?
     private var autoArrangeRowItem: NSMenuItem?
@@ -36,8 +36,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     func applicationDidBecomeActive(_ notification: Notification) {
         _ = notification
+        rootViewController?.windowVisibilityStateDidChange()
         guard rootViewController == nil else { return }
         evaluateLaunchPermissions()
+    }
+
+    func applicationDidResignActive(_ notification: Notification) {
+        _ = notification
+        rootViewController?.windowVisibilityStateDidChange()
+    }
+
+    func applicationDidHide(_ notification: Notification) {
+        _ = notification
+        rootViewController?.windowVisibilityStateDidChange()
+    }
+
+    func applicationDidUnhide(_ notification: Notification) {
+        _ = notification
+        rootViewController?.windowVisibilityStateDidChange()
     }
 
     private func startMainApplication(hasScreenCaptureAccess: Bool) {
@@ -50,7 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let stateStore = WorkspaceStateStore(bundleIdentifier: bundleID)
         self.shortcutManager = shortcutManager
         shortcutManager.onDidChange = { [weak self] in
-            self?.syncMinimizeMenuShortcut()
+            self?.syncWindowVisibilityMenuShortcut()
         }
 
         let root = WorkspaceRootViewController(
@@ -64,7 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         let window = NSWindow(
             contentRect: NSRect(x: 140, y: 120, width: 1280, height: 820),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
@@ -413,15 +429,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         mainMenu.addItem(windowMenuItem)
 
         let windowMenu = NSMenu(title: "Window")
-        let minimizeItem = NSMenuItem(
-            title: "Minimize",
-            action: #selector(toggleMinimize(_:)),
-            keyEquivalent: "m"
+        let windowVisibilityItem = NSMenuItem(
+            title: "Hide Window",
+            action: #selector(toggleWindowVisibility(_:)),
+            keyEquivalent: "h"
         )
-        minimizeItem.keyEquivalentModifierMask = [.command]
-        minimizeItem.target = self
-        minimizeMenuItem = minimizeItem
-        windowMenu.addItem(minimizeItem)
+        windowVisibilityItem.keyEquivalentModifierMask = [.command]
+        windowVisibilityItem.target = self
+        windowVisibilityMenuItem = windowVisibilityItem
+        windowMenu.addItem(windowVisibilityItem)
         windowMenuItem.submenu = windowMenu
 
         let developerMenuItem = NSMenuItem()
@@ -670,14 +686,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     @objc
-    private func toggleMinimize(_ sender: Any?) {
+    private func toggleWindowVisibility(_ sender: Any?) {
         _ = sender
+        toggleMainWindowVisibility()
+    }
+
+    func toggleMainWindowVisibility() {
         guard let window else { return }
-        if window.isMiniaturized {
-            window.deminiaturize(nil)
-        } else {
-            window.miniaturize(nil)
+        if NSApp.isHidden {
+            NSApp.unhide(nil)
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
         }
+        NSApp.hide(nil)
     }
 
     @objc
@@ -754,8 +776,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        if menuItem == minimizeMenuItem {
-            menuItem.title = window?.isMiniaturized == true ? "Restore" : "Minimize"
+        if menuItem == windowVisibilityMenuItem {
+            menuItem.title = NSApp.isHidden ? "Show Window" : "Hide Window"
         }
         if menuItem == autoArrangeOffItem || menuItem == autoArrangeColumnItem
             || menuItem == autoArrangeRowItem || menuItem == autoArrangeSquareItem {
@@ -772,6 +794,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     func windowDidBecomeKey(_ notification: Notification) {
         guard let window = notification.object as? NSWindow else { return }
         applyChromelessWindowStyle(window)
+        rootViewController?.windowVisibilityStateDidChange()
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        guard let eventWindow = notification.object as? NSWindow else { return }
+        guard eventWindow == window else { return }
+        rootViewController?.windowVisibilityStateDidChange()
+    }
+
+    func windowDidChangeOcclusionState(_ notification: Notification) {
+        guard let eventWindow = notification.object as? NSWindow else { return }
+        guard eventWindow == window else { return }
+        rootViewController?.windowVisibilityStateDidChange()
     }
 
     func windowWillStartLiveResize(_ notification: Notification) {
@@ -798,14 +833,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         rootViewController?.windowDidMove(eventWindow)
     }
 
-    private func syncMinimizeMenuShortcut() {
-        guard let minimizeMenuItem, let shortcutManager else { return }
-        if let equiv = shortcutManager.menuKeyEquivalent(for: .minimizeWindow) {
-            minimizeMenuItem.keyEquivalent = equiv.key
-            minimizeMenuItem.keyEquivalentModifierMask = equiv.modifiers
+    private func syncWindowVisibilityMenuShortcut() {
+        guard let windowVisibilityMenuItem, let shortcutManager else { return }
+        if let equiv = shortcutManager.menuKeyEquivalent(for: .hideWindow) {
+            windowVisibilityMenuItem.keyEquivalent = equiv.key
+            windowVisibilityMenuItem.keyEquivalentModifierMask = equiv.modifiers
         } else {
-            minimizeMenuItem.keyEquivalent = ""
-            minimizeMenuItem.keyEquivalentModifierMask = []
+            windowVisibilityMenuItem.keyEquivalent = ""
+            windowVisibilityMenuItem.keyEquivalentModifierMask = []
         }
     }
 
@@ -838,8 +873,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func applyChromelessWindowStyle(_ window: NSWindow) {
         let sharpCorners = rootViewController?.menuSharpCornersEnabled() == true
         let targetStyleMask: NSWindow.StyleMask = sharpCorners
-            ? [.borderless, .resizable, .miniaturizable, .fullSizeContentView]
-            : [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+            ? [.borderless, .resizable, .fullSizeContentView]
+            : [.titled, .closable, .resizable, .fullSizeContentView]
         if window.styleMask != targetStyleMask {
             let frame = window.frame
             window.styleMask = targetStyleMask
@@ -852,7 +887,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = true
-        let buttons = [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton]
+        let buttons = [NSWindow.ButtonType.closeButton, .zoomButton]
         for kind in buttons {
             guard let button = window.standardWindowButton(kind) else { continue }
             button.isHidden = true
@@ -903,7 +938,7 @@ private final class PermissionGateWindowController: NSWindowController {
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 520, height: 440),
-            styleMask: [.titled, .closable, .miniaturizable],
+            styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
@@ -1157,7 +1192,7 @@ private final class OrcvAboutWindowController: NSWindowController {
     init() {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 340, height: 380),
-            styleMask: [.titled, .closable, .miniaturizable],
+            styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )

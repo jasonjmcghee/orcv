@@ -1473,8 +1473,14 @@ final class WorkspaceRootViewController: NSViewController {
         case .deselectTile:
             menuDeselectTile()
             return true
-        case .minimizeWindow:
-            return false
+        case .hideWindow:
+            guard isOrcvWindowFocused() else { return false }
+            if let appDelegate = NSApp.delegate as? AppDelegate {
+                appDelegate.toggleMainWindowVisibility()
+            } else {
+                NSApp.hide(nil)
+            }
+            return true
         case .navigateBack:
             guard isPointerWithinOrcvWindowBounds() else { return false }
             return navigateCameraBack()
@@ -1492,7 +1498,7 @@ final class WorkspaceRootViewController: NSViewController {
 
     private func actionRequiresFocusedWindow(_ action: ShortcutAction) -> Bool {
         switch action {
-        case .toggleTeleport, .windowFollowHold, .minimizeWindow, .navigateBack, .navigateForward, .removeDisplay:
+        case .toggleTeleport, .windowFollowHold, .hideWindow, .navigateBack, .navigateForward, .removeDisplay:
             return false
         case .newDisplay, .fullscreenSelected, .jumpNextDisplay, .jumpPreviousDisplay, .deselectTile:
             return true
