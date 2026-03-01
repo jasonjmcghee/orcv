@@ -1406,15 +1406,7 @@ final class WorkspaceRootViewController: NSViewController {
     }
 
     private func displayIDs(at point: CGPoint) -> [CGDirectDisplayID] {
-        var onlineDisplayCount: UInt32 = 0
-        guard CGGetOnlineDisplayList(0, nil, &onlineDisplayCount) == .success, onlineDisplayCount > 0 else {
-            return []
-        }
-        var ids = [CGDirectDisplayID](repeating: 0, count: Int(onlineDisplayCount))
-        var count: UInt32 = 0
-        let result = CGGetDisplaysWithPoint(point, onlineDisplayCount, &ids, &count)
-        guard result == .success, count > 0 else { return [] }
-        return Array(ids.prefix(Int(count)))
+        DisplayQuery.displayIDs(at: point)
     }
 
     private func scheduleArrangementSync() {
@@ -2130,10 +2122,7 @@ final class WorkspaceRootViewController: NSViewController {
                 continue
             }
 
-            let tileSize = normalizedTileSize(
-                CGSize(width: entry.tileWidth, height: entry.tileHeight),
-                pixelSize: descriptor.pixelSize
-            )
+            let tileSize = TileGeometry.defaultTileSize(pixelSize: descriptor.pixelSize)
 
             let restoredWorkspace = Workspace(
                 id: UUID(),
@@ -2167,19 +2156,6 @@ final class WorkspaceRootViewController: NSViewController {
             canvasCamera: restoredCanvasCamera(from: persisted),
             canvasSavepoints: restoredCanvasSavepoints(from: persisted)
         )
-    }
-
-    private func normalizedTileSize(_ raw: CGSize, pixelSize: CGSize) -> CGSize {
-        let ratio = max(0.1, pixelSize.width / max(1.0, pixelSize.height))
-        let minHeight = max(140.0, 220.0 / ratio)
-        let maxHeight = min(900.0, 1200.0 / ratio)
-
-        var targetHeight = raw.height
-        if !targetHeight.isFinite || targetHeight <= 0 {
-            targetHeight = 360.0 / ratio
-        }
-        targetHeight = max(minHeight, min(maxHeight, targetHeight))
-        return CGSize(width: targetHeight * ratio, height: targetHeight)
     }
 
     private func restoredCanvasOrigin(from entry: PersistedWorkspaceState.WorkspaceEntry) -> CGPoint? {

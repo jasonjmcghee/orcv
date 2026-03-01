@@ -368,11 +368,11 @@ final class OrcvGridView: NSView {
         let availableWidth = max(300.0, bounds.width - horizontalPadding * 2.0)
         let totalSpacing = CGFloat(max(0, safeColumns - 1)) * spacing
         let targetWidth = max(160.0, (availableWidth - totalSpacing) / CGFloat(safeColumns))
-        return normalizedTileSize(targetWidth: targetWidth, pixelSize: pixelSize, limitMaxHeight: false)
+        return TileGeometry.normalizedSizeFromWidth(pixelSize: pixelSize, targetWidth: targetWidth)
     }
 
     func reasonableFixedTileSize(for pixelSize: CGSize) -> CGSize {
-        normalizedTileSize(targetWidth: 420.0, pixelSize: pixelSize, limitMaxHeight: true)
+        TileGeometry.defaultTileSize(pixelSize: pixelSize)
     }
 
     private func recomputeTileFrames() {
@@ -645,19 +645,6 @@ final class OrcvGridView: NSView {
         _ = hostLayer
         reorderTargetFrame = nil
         reorderIndicatorLayer.isHidden = true
-    }
-
-    private func normalizedTileSize(targetWidth: CGFloat, pixelSize: CGSize, limitMaxHeight: Bool) -> CGSize {
-        let ratio = max(0.1, pixelSize.width / max(1.0, pixelSize.height))
-        let minHeight = max(140.0, 220.0 / ratio)
-        let maxHeight = min(900.0, 1200.0 / ratio)
-        var targetHeight = targetWidth / ratio
-        if limitMaxHeight {
-            targetHeight = max(minHeight, min(maxHeight, targetHeight))
-        } else {
-            targetHeight = max(minHeight, targetHeight)
-        }
-        return CGSize(width: targetHeight * ratio, height: targetHeight)
     }
 
     private func viewportFrames(fromWorldFrames worldFrames: [UUID: CGRect]) -> [UUID: CGRect] {

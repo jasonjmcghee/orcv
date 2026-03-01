@@ -108,15 +108,7 @@ final class WorkspaceStore {
         for i in workspaces.indices {
             let current = workspaces[i].tileSize
             let pixel = workspaces[i].displayPixelSize
-            let ratio = max(0.1, pixel.width / max(1.0, pixel.height))
-            let minHeight = max(140.0, 220.0 / ratio)
-            let maxHeight = min(900.0, 1200.0 / ratio)
-            var targetHeight = current.height
-            if !targetHeight.isFinite || targetHeight <= 0 {
-                targetHeight = 360.0 / ratio
-            }
-            targetHeight = max(minHeight, min(maxHeight, targetHeight))
-            let normalized = CGSize(width: targetHeight * ratio, height: targetHeight)
+            let normalized = WorkspaceStore.defaultTileSize(for: pixel)
             if abs(current.width - normalized.width) > 0.5 || abs(current.height - normalized.height) > 0.5 {
                 workspaces[i].tileSize = normalized
                 changed = true
@@ -271,8 +263,6 @@ final class WorkspaceStore {
     }
 
     private static func defaultTileSize(for pixelSize: CGSize) -> CGSize {
-        let baseWidth: CGFloat = 360.0
-        let aspect = pixelSize.height > 0 ? pixelSize.width / pixelSize.height : (16.0 / 9.0)
-        return CGSize(width: baseWidth, height: baseWidth / max(0.6, min(2.4, aspect)))
+        TileGeometry.defaultTileSize(pixelSize: pixelSize)
     }
 }

@@ -48,15 +48,8 @@ final class VirtualDisplayManager {
     }
 
     func physicalDisplayDescriptors() -> [DisplayDescriptor] {
-        var displayCount: UInt32 = 0
-        guard CGGetOnlineDisplayList(0, nil, &displayCount) == .success else {
-            return []
-        }
-
-        var ids = [CGDirectDisplayID](repeating: 0, count: Int(displayCount))
-        guard CGGetOnlineDisplayList(displayCount, &ids, &displayCount) == .success else {
-            return []
-        }
+        let ids = DisplayQuery.onlineDisplayIDs()
+        guard !ids.isEmpty else { return [] }
 
         return ids.map { id in
             let width = CGFloat(CGDisplayPixelsWide(id))
@@ -71,18 +64,11 @@ final class VirtualDisplayManager {
     }
 
     func systemDisplayIndexByID() -> [CGDirectDisplayID: Int] {
-        var displayCount: UInt32 = 0
-        guard CGGetOnlineDisplayList(0, nil, &displayCount) == .success else {
-            return [:]
-        }
-
-        var ids = [CGDirectDisplayID](repeating: 0, count: Int(displayCount))
-        guard CGGetOnlineDisplayList(displayCount, &ids, &displayCount) == .success else {
-            return [:]
-        }
+        let ids = DisplayQuery.onlineDisplayIDs()
+        guard !ids.isEmpty else { return [:] }
 
         var map: [CGDirectDisplayID: Int] = [:]
-        for (idx, id) in ids.prefix(Int(displayCount)).enumerated() {
+        for (idx, id) in ids.enumerated() {
             map[id] = idx + 1
         }
         return map
