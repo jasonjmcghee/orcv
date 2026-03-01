@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var rootViewController: WorkspaceRootViewController?
     private var shortcutManager: ShortcutManager?
     private var shortcutsWindowController: ShortcutSettingsWindowController?
+    private var aboutWindowController: OrcvAboutWindowController?
     private var alwaysOnTopMenuItem: NSMenuItem?
     private var showDisplayIDsMenuItem: NSMenuItem?
     private var centerTileOnJumpMenuItem: NSMenuItem?
@@ -282,12 +283,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc
     private func showAboutPanel(_ sender: Any?) {
         _ = sender
-        let options: [NSApplication.AboutPanelOptionKey: Any] = [
-            .applicationName: "orcv",
-            .version: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0",
-            .credits: NSAttributedString(string: "Controls:\n• Drag displays to position them on canvas\n• Drag empty background to move the app window\n• Hold Space while hovering/focused to move window with cursor\n• Use Shortcuts settings to record key bindings"),
-        ]
-        NSApp.orderFrontStandardAboutPanel(options: options)
+        if aboutWindowController == nil {
+            aboutWindowController = OrcvAboutWindowController()
+        }
+        aboutWindowController?.showWindow(nil)
+        aboutWindowController?.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -419,5 +419,112 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             titlebarContainer.isHidden = true
             titlebarContainer.alphaValue = 0.0
         }
+    }
+}
+
+private final class OrcvAboutWindowController: NSWindowController {
+    private static let githubURL = URL(string: "https://github.com/jasonjmcghee/orcv")
+    private static let tagline = "orcv is a desktop control surface for running and supervising many visual tasks at once"
+
+    init() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 380),
+            styleMask: [.titled, .closable, .miniaturizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "About orcv"
+        window.isReleasedWhenClosed = false
+        window.tabbingMode = .disallowed
+        window.backgroundColor = NSColor.windowBackgroundColor
+
+        let root = NSView(frame: window.contentView?.bounds ?? .zero)
+        root.translatesAutoresizingMaskIntoConstraints = false
+
+        let iconView = NSImageView()
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        iconView.image = NSApp.applicationIconImage
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+
+        let titleLabel = NSTextField(labelWithString: "orcv")
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        titleLabel.font = NSFont.systemFont(ofSize: 28, weight: .semibold)
+        titleLabel.textColor = .labelColor
+        titleLabel.alignment = .center
+
+        let taglineLabel = NSTextField(wrappingLabelWithString: Self.tagline)
+        taglineLabel.translatesAutoresizingMaskIntoConstraints = false
+        taglineLabel.font = NSFont.systemFont(ofSize: 12, weight: .regular)
+        taglineLabel.textColor = .white
+        taglineLabel.alignment = .center
+        taglineLabel.maximumNumberOfLines = 0
+        taglineLabel.lineBreakMode = .byWordWrapping
+
+        let versionLabel = NSTextField(labelWithString: Self.versionSummary())
+        versionLabel.translatesAutoresizingMaskIntoConstraints = false
+        versionLabel.font = NSFont.systemFont(ofSize: 13, weight: .regular)
+        versionLabel.textColor = .secondaryLabelColor
+        versionLabel.alignment = .center
+
+        let githubButton = NSButton(title: "GitHub", target: nil, action: nil)
+        githubButton.translatesAutoresizingMaskIntoConstraints = false
+        githubButton.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        githubButton.bezelStyle = .rounded
+        githubButton.setButtonType(.momentaryPushIn)
+
+        window.contentView = root
+        root.addSubview(iconView)
+        root.addSubview(titleLabel)
+        root.addSubview(taglineLabel)
+        root.addSubview(versionLabel)
+        root.addSubview(githubButton)
+
+        NSLayoutConstraint.activate([
+            iconView.topAnchor.constraint(equalTo: root.topAnchor, constant: 28),
+            iconView.centerXAnchor.constraint(equalTo: root.centerXAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 88),
+            iconView.heightAnchor.constraint(equalToConstant: 88),
+
+            titleLabel.topAnchor.constraint(equalTo: iconView.bottomAnchor, constant: 14),
+            titleLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 24),
+            titleLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -24),
+
+            taglineLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 14),
+            taglineLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 34),
+            taglineLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -34),
+
+            versionLabel.topAnchor.constraint(equalTo: taglineLabel.bottomAnchor, constant: 20),
+            versionLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 24),
+            versionLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -24),
+
+            githubButton.topAnchor.constraint(equalTo: versionLabel.bottomAnchor, constant: 20),
+            githubButton.centerXAnchor.constraint(equalTo: root.centerXAnchor),
+            githubButton.widthAnchor.constraint(equalToConstant: 96),
+            githubButton.heightAnchor.constraint(equalToConstant: 30),
+            githubButton.bottomAnchor.constraint(lessThanOrEqualTo: root.bottomAnchor, constant: -20),
+        ])
+
+        super.init(window: window)
+
+        githubButton.target = self
+        githubButton.action = #selector(openGitHub)
+        window.center()
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    @objc
+    private func openGitHub() {
+        guard let url = Self.githubURL else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    private static func versionSummary() -> String {
+        let bundle = Bundle.main
+        let version = (bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.1.0"
+        let build = (bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String) ?? "1"
+        return "Version \(version) (\(build))"
     }
 }
