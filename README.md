@@ -6,7 +6,7 @@ _These are real / recognized displays by macos, which are automatically arranged
 
 <img width="896" height="559" alt="Screenshot 2026-03-01 at 2 40 12 PM" src="https://github.com/user-attachments/assets/f6e084dd-71a0-45a8-bd29-957302cae525" />
 
-_Yes this is a screenshot of me deciding I wanted a recursive screenshot
+_Yes this is a screenshot of me deciding I wanted a recursive screenshot._
 
 In today's world, long-running tasks that you have to manage have visual aspects. That doesn't work well with the terminal. tmux and Zellij and friends have a lot of great attributes, but I had yet to use something that checked all my boxes.
 
