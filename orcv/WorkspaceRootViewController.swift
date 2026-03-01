@@ -21,6 +21,11 @@ final class WorkspaceRootViewController: NSViewController {
         let cameraOffsetFromTile: CGPoint?
     }
 
+    private enum ShiftPanAxisLock {
+        case horizontal
+        case vertical
+    }
+
     private let displayManager: VirtualDisplayManager
     private let workspaceStore: WorkspaceStore
     private let pointerRouter: PointerRouter
@@ -95,10 +100,12 @@ final class WorkspaceRootViewController: NSViewController {
     private(set) var arrangePadding: CGFloat = 2.0
     private(set) var autoArrangeMode: ArrangeMode?
     private var pendingScrollZoomDelta: CGFloat = 0.0
+    private var shiftPanAxisLock: ShiftPanAxisLock?
     private var cameraHistory: [CameraHistoryEntry] = []
     private var cameraHistoryCursor: Int = -1
     private var isNavigatingHistory = false
     private var hasUsedAdjacentJumpSinceBootstrap = false
+    private let maxCameraHistoryEntries = 1000
 
     var onInitialBootstrapComplete: (() -> Void)?
 
@@ -1212,7 +1219,33 @@ final class WorkspaceRootViewController: NSViewController {
         }
 
         pendingScrollZoomDelta = 0.0
-        return applyCanvasPan(deltaX: normalizedX, deltaY: normalizedY)
+        let shiftHeld = event.modifierFlags.contains(.shift)
+        var panDeltaX = normalizedX
+        var panDeltaY = normalizedY
+        if shiftHeld {
+            if shiftPanAxisLock == nil {
+                shiftPanAxisLock = abs(panDeltaX) > abs(panDeltaY) ? .horizontal : .vertical
+            }
+            switch shiftPanAxisLock {
+            case .horizontal:
+                panDeltaY = 0
+            case .vertical:
+                panDeltaX = 0
+            case .none:
+                break
+            }
+        } else {
+            shiftPanAxisLock = nil
+        }
+
+        if event.phase == .ended
+            || event.phase == .cancelled
+            || event.momentumPhase == .ended
+            || event.momentumPhase == .cancelled {
+            shiftPanAxisLock = nil
+        }
+
+        return applyCanvasPan(deltaX: panDeltaX, deltaY: panDeltaY)
     }
 
     @discardableResult
@@ -1443,10 +1476,18 @@ final class WorkspaceRootViewController: NSViewController {
         case .minimizeWindow:
             return false
         case .navigateBack:
+            guard isPointerWithinOrcvWindowBounds() else { return false }
             return navigateCameraBack()
         case .navigateForward:
+            guard isPointerWithinOrcvWindowBounds() else { return false }
             return navigateCameraForward()
         }
+    }
+
+    private func isPointerWithinOrcvWindowBounds() -> Bool {
+        guard let window = view.window, window.isVisible else { return false }
+        let mouseInScreen = NSEvent.mouseLocation
+        return isPointerDirectlyOverWindow(window: window, screenPoint: mouseInScreen)
     }
 
     private func actionRequiresFocusedWindow(_ action: ShortcutAction) -> Bool {
@@ -2033,37 +2074,84 @@ final class WorkspaceRootViewController: NSViewController {
     }
 
     private func pushCameraHistory() {
-        guard let camera = currentCanvasCameraState() ?? lastCanvasCamera else { return }
+        guard let entry = currentCameraHistoryEntry() else { return }
         // Skip if identical to current top of stack.
         if let last = cameraHistory.last,
            cameraHistoryCursor == cameraHistory.count - 1,
-           abs(last.camera.origin.x - camera.origin.x) < 0.5,
-           abs(last.camera.origin.y - camera.origin.y) < 0.5,
-           abs(last.camera.magnification - camera.magnification) < 0.001 {
+           !historyEntriesDiffer(last, entry) {
             return
         }
-        let entry = CameraHistoryEntry(camera: camera, windowFrame: view.window?.frame)
         // Truncate any forward history
         if cameraHistoryCursor < cameraHistory.count - 1 {
             cameraHistory.removeSubrange((cameraHistoryCursor + 1)...)
         }
         cameraHistory.append(entry)
         // Cap at limit
-        if cameraHistory.count > 50 {
-            cameraHistory.removeFirst(cameraHistory.count - 50)
+        if cameraHistory.count > maxCameraHistoryEntries {
+            cameraHistory.removeFirst(cameraHistory.count - maxCameraHistoryEntries)
         }
         cameraHistoryCursor = cameraHistory.count - 1
     }
 
-    private func navigateCameraBack() -> Bool {
-        guard cameraHistoryCursor >= 0, !cameraHistory.isEmpty else { return false }
-        // If at the end of the stack, append current position so Forward can return here.
-        if cameraHistoryCursor == cameraHistory.count - 1,
-           let current = currentCanvasCameraState() ?? lastCanvasCamera {
-            let entry = CameraHistoryEntry(camera: current, windowFrame: view.window?.frame)
-            cameraHistory.append(entry)
-            cameraHistoryCursor = cameraHistory.count - 1
+    private func currentCameraHistoryEntry() -> CameraHistoryEntry? {
+        guard let camera = currentCanvasCameraState() ?? lastCanvasCamera else { return nil }
+        return CameraHistoryEntry(camera: camera, windowFrame: view.window?.frame)
+    }
+
+    private func historyEntriesDiffer(_ lhs: CameraHistoryEntry, _ rhs: CameraHistoryEntry) -> Bool {
+        if cameraStatesDiffer(lhs.camera, rhs.camera) {
+            return true
         }
+        switch (lhs.windowFrame, rhs.windowFrame) {
+        case (nil, nil):
+            return false
+        case let (.some(a), .some(b)):
+            return windowFramesDiffer(a, b)
+        default:
+            return true
+        }
+    }
+
+    /// Sync live camera/window state into history before Back navigation.
+    /// If user edited state after going Back, this creates a new branch tip.
+    private func syncCurrentStateIntoHistoryForBackNavigation() {
+        guard let current = currentCameraHistoryEntry() else { return }
+        guard !cameraHistory.isEmpty else {
+            cameraHistory = [current]
+            cameraHistoryCursor = 0
+            return
+        }
+
+        if cameraHistoryCursor < 0 || cameraHistoryCursor >= cameraHistory.count {
+            cameraHistory = [current]
+            cameraHistoryCursor = 0
+            return
+        }
+
+        if cameraHistoryCursor < cameraHistory.count - 1 {
+            let cursorEntry = cameraHistory[cameraHistoryCursor]
+            guard historyEntriesDiffer(cursorEntry, current) else { return }
+            cameraHistory.removeSubrange((cameraHistoryCursor + 1)...)
+            cameraHistory.append(current)
+        } else {
+            guard let last = cameraHistory.last, historyEntriesDiffer(last, current) else { return }
+            cameraHistory.append(current)
+        }
+
+        if cameraHistory.count > maxCameraHistoryEntries {
+            cameraHistory.removeFirst(cameraHistory.count - maxCameraHistoryEntries)
+        }
+        cameraHistoryCursor = cameraHistory.count - 1
+    }
+
+    private func seedCameraHistoryIfNeeded() {
+        guard cameraHistory.isEmpty else { return }
+        pushCameraHistory()
+    }
+
+    private func navigateCameraBack() -> Bool {
+        syncCurrentStateIntoHistoryForBackNavigation()
+        guard cameraHistoryCursor >= 0, !cameraHistory.isEmpty else { return false }
         guard cameraHistoryCursor > 0 else { return false }
         cameraHistoryCursor -= 1
         isNavigatingHistory = true
@@ -2694,6 +2782,7 @@ final class WorkspaceRootViewController: NSViewController {
                 self?.centerCanvasViewport()
             }
             self?.ensureVisibleWorkspaceAfterBootstrap()
+            self?.seedCameraHistoryIfNeeded()
         }
 
         setTileStatus(nil)
