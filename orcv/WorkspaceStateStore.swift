@@ -9,6 +9,9 @@ struct PersistedWorkspaceState: Codable {
         var windowY: Double?
         var windowWidth: Double?
         var windowHeight: Double?
+        var referenceTileSerial: UInt32?
+        var tileOffsetX: Double?
+        var tileOffsetY: Double?
     }
 
     struct WorkspaceEntry: Codable {
@@ -32,6 +35,8 @@ struct PersistedWorkspaceState: Codable {
     var canvasOffsetX: Double?
     var canvasOffsetY: Double?
     var canvasSavepoints: [String: CameraBookmark]?
+    var arrangePadding: Double?
+    var autoArrangeModeRawValue: String?
     var workspaces: [WorkspaceEntry]
 }
 

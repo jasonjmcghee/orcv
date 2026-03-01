@@ -10,6 +10,9 @@ enum ShortcutAction: String, CaseIterable {
     case jumpPreviousDisplay = "jump_previous_display"
     case windowFollowHold = "window_follow_hold"
     case deselectTile = "deselect_tile"
+    case minimizeWindow = "minimize_window"
+    case navigateBack = "navigate_back"
+    case navigateForward = "navigate_forward"
 
     var title: String {
         switch self {
@@ -21,6 +24,9 @@ enum ShortcutAction: String, CaseIterable {
         case .jumpPreviousDisplay: return "Jump Previous Display"
         case .windowFollowHold: return "Window Follow (Hold)"
         case .deselectTile: return "Deselect Tile"
+        case .minimizeWindow: return "Minimize"
+        case .navigateBack: return "Navigate Back"
+        case .navigateForward: return "Navigate Forward"
         }
     }
 
@@ -34,6 +40,9 @@ enum ShortcutAction: String, CaseIterable {
         case .jumpPreviousDisplay: return "shift+tab"
         case .windowFollowHold: return "space"
         case .deselectTile: return "backspace"
+        case .minimizeWindow: return "cmd+m"
+        case .navigateBack: return "cmd+["
+        case .navigateForward: return "cmd+]"
         }
     }
 }
@@ -489,6 +498,35 @@ final class ShortcutManager {
 
     static func scalingResizeModifierOptions() -> [(token: String, label: String)] {
         modifierOptions()
+    }
+
+    func menuKeyEquivalent(for action: ShortcutAction) -> (key: String, modifiers: NSEvent.ModifierFlags)? {
+        guard let binding = compiled[action], case .key(let chord) = binding else { return nil }
+        guard let token = Self.keyCodeToToken[chord.keyCode] else { return nil }
+        return (key: token, modifiers: chord.modifiers)
+    }
+
+    func reloadFromDisk() {
+        let loaded = store.load()
+        let loadedBindings = loaded.bindings
+        var resolved: [ShortcutAction: String] = [:]
+        for action in ShortcutAction.allCases {
+            let value = loadedBindings[action] ?? action.defaultShortcut
+            if let binding = Self.parse(bindingString: value) {
+                resolved[action] = binding.canonical
+            }
+        }
+        bindings = resolved
+        compiled = Self.compile(bindings: resolved)
+        scalingResizeModifier = Self.parseModifierToken(loaded.scalingResizeModifierToken)
+            ?? Self.defaultScalingResizeModifier
+        zoomModifier = Self.parseModifierToken(loaded.zoomModifierToken)
+            ?? Self.defaultZoomModifier
+        jumpToSlotModifier = Self.parseModifierToken(loaded.jumpToSlotModifierToken)
+            ?? Self.defaultJumpToSlotModifier
+        savepointModifier = Self.parseModifierToken(loaded.savepointModifierToken)
+            ?? Self.defaultSavepointModifier
+        onDidChange?()
     }
 
     func shortcutsFilePath() -> String {

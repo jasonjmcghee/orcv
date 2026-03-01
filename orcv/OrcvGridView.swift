@@ -55,6 +55,7 @@ final class OrcvGridView: NSView {
             previewOrderIDs = nil
             dragBaseOrderIDs = nil
             dragFrame = nil
+            dragStartWorldOrigin = nil
             dragDidMove = false
             needsLayout = true
             needsDisplay = true
@@ -88,7 +89,7 @@ final class OrcvGridView: NSView {
     var onFocusRequest: ((UUID, CGPoint, CGRect, NSEvent.ModifierFlags) -> Void)?
     var onBackgroundClick: (() -> Void)?
     var onReorderCommit: (([UUID]) -> Void)?
-    var onCanvasMoveCommit: ((UUID, CGPoint) -> Void)?
+    var onCanvasMoveCommit: ((_ workspaceID: UUID, _ newOrigin: CGPoint, _ oldOrigin: CGPoint?) -> Void)?
     var onBackgroundWindowDragRequest: ((NSEvent) -> Void)?
     var onSwipeDown: (() -> Void)?
     var surfaceProvider: ((CGDirectDisplayID) -> IOSurface?)?
@@ -116,6 +117,7 @@ final class OrcvGridView: NSView {
     private var previewOrderIDs: [UUID]?
     private var dragBaseOrderIDs: [UUID]?
     private var dragDidMove = false
+    private var dragStartWorldOrigin: CGPoint?
     private var reorderTargetFrame: CGRect?
     private let dragStartThreshold: CGFloat = 5.0
     private let reorderIndicatorLayer = CAShapeLayer()
@@ -196,6 +198,7 @@ final class OrcvGridView: NSView {
             dragStartPoint = point
             dragPointerOffset = pointInTile
             dragFrame = frame
+            dragStartWorldOrigin = tileWorldFrames[workspace.id]?.origin
             previewOrderIDs = nil
             dragBaseOrderIDs = nil
             reorderTargetFrame = nil
@@ -259,6 +262,7 @@ final class OrcvGridView: NSView {
         defer {
             dragWorkspaceID = nil
             dragFrame = nil
+            dragStartWorldOrigin = nil
             reorderTargetFrame = nil
             previewOrderIDs = nil
             dragBaseOrderIDs = nil
@@ -272,7 +276,7 @@ final class OrcvGridView: NSView {
 
         if layoutMode == .canvas {
             if let dragFrame {
-                onCanvasMoveCommit?(draggedID, worldPoint(fromViewportPoint: dragFrame.origin))
+                onCanvasMoveCommit?(draggedID, worldPoint(fromViewportPoint: dragFrame.origin), dragStartWorldOrigin)
             }
             return
         }

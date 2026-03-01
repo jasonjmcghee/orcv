@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		C7D588F7DF7BE2CFC9DD659F /* ArrangeMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEDD0E095668BD7F5F203134 /* ArrangeMode.swift */; };
+		0DB8656121C2AB6DF756C2BC /* ArrangeSettingsWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9FA97ACA6DA778A6EB83742C /* ArrangeSettingsWindowController.swift */; };
 		969908C92F540800005EBCA8 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 969908B72F540800005EBCA8 /* AppDelegate.swift */; };
 		969908CA2F540800005EBCA8 /* DisplayStreamManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 969908B92F540800005EBCA8 /* DisplayStreamManager.swift */; };
 		969908CB2F540800005EBCA8 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 969908BA2F540800005EBCA8 /* main.swift */; };
@@ -44,6 +46,8 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		BEDD0E095668BD7F5F203134 /* ArrangeMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArrangeMode.swift; sourceTree = "<group>"; };
+		9FA97ACA6DA778A6EB83742C /* ArrangeSettingsWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArrangeSettingsWindowController.swift; sourceTree = "<group>"; };
 		96235BBD2F5405B4009C53EB /* orcv.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = orcv.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		96235BCA2F5405B5009C53EB /* orcvTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = orcvTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		96235BD42F5405B5009C53EB /* orcvUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = orcvUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -127,6 +131,8 @@
 		969908C82F540800005EBCA8 /* orcv */ = {
 			isa = PBXGroup;
 			children = (
+				BEDD0E095668BD7F5F203134 /* ArrangeMode.swift */,
+				9FA97ACA6DA778A6EB83742C /* ArrangeSettingsWindowController.swift */,
 				969908B72F540800005EBCA8 /* AppDelegate.swift */,
 				969908B92F540800005EBCA8 /* DisplayStreamManager.swift */,
 				969908BA2F540800005EBCA8 /* main.swift */,
@@ -290,6 +296,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C7D588F7DF7BE2CFC9DD659F /* ArrangeMode.swift in Sources */,
+				0DB8656121C2AB6DF756C2BC /* ArrangeSettingsWindowController.swift in Sources */,
 				969908C92F540800005EBCA8 /* AppDelegate.swift in Sources */,
 				969908CA2F540800005EBCA8 /* DisplayStreamManager.swift in Sources */,
 				969908CB2F540800005EBCA8 /* main.swift in Sources */,

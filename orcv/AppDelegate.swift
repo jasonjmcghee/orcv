@@ -2,7 +2,7 @@ import AppKit
 import CoreGraphics
 import Foundation
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
     private static let mainWindowAutosaveName = "orcvMainWindowFrame"
 
     private var window: NSWindow?
@@ -17,6 +17,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var preserveSizeOnSlotJumpMenuItem: NSMenuItem?
     private var restoreWindowFrameOnSavepointRecallMenuItem: NSMenuItem?
     private var swapResizeBehaviorMenuItem: NSMenuItem?
+    private var minimizeMenuItem: NSMenuItem?
+    private var autoArrangeOffItem: NSMenuItem?
+    private var autoArrangeColumnItem: NSMenuItem?
+    private var autoArrangeRowItem: NSMenuItem?
+    private var autoArrangeSquareItem: NSMenuItem?
+    private var arrangeSettingsWindowController: ArrangeSettingsWindowController?
     private var terminateInProgress = false
     private var didShowMainWindow = false
 
@@ -42,6 +48,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let shortcutManager = ShortcutManager(bundleIdentifier: bundleID)
         let stateStore = WorkspaceStateStore(bundleIdentifier: bundleID)
         self.shortcutManager = shortcutManager
+        shortcutManager.onDidChange = { [weak self] in
+            self?.syncMinimizeMenuShortcut()
+        }
 
         let root = WorkspaceRootViewController(
             displayManager: displayManager,
@@ -184,36 +193,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         editMenu.addItem(redoItem)
         editMenuItem.submenu = editMenu
 
-        let navigateMenuItem = NSMenuItem()
-        mainMenu.addItem(navigateMenuItem)
-
-        let navigateMenu = NSMenu(title: "Navigate")
-        let jumpNextDisplayItem = NSMenuItem(
-            title: "Jump Next Display",
-            action: #selector(navigateJumpNextDisplay(_:)),
-            keyEquivalent: ""
-        )
-        jumpNextDisplayItem.target = self
-        navigateMenu.addItem(jumpNextDisplayItem)
-
-        let jumpPreviousDisplayItem = NSMenuItem(
-            title: "Jump Previous Display",
-            action: #selector(navigateJumpPreviousDisplay(_:)),
-            keyEquivalent: ""
-        )
-        jumpPreviousDisplayItem.target = self
-        navigateMenu.addItem(jumpPreviousDisplayItem)
-        navigateMenu.addItem(.separator())
-
-        let deselectTileItem = NSMenuItem(
-            title: "Deselect Tile",
-            action: #selector(navigateDeselectTile(_:)),
-            keyEquivalent: ""
-        )
-        deselectTileItem.target = self
-        navigateMenu.addItem(deselectTileItem)
-        navigateMenuItem.submenu = navigateMenu
-
         let viewMenuItem = NSMenuItem()
         mainMenu.addItem(viewMenuItem)
 
@@ -254,7 +233,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             keyEquivalent: ""
         )
         preserveSizeOnSlotJumpItem.target = self
-        preserveSizeOnSlotJumpItem.state = .on
+        preserveSizeOnSlotJumpItem.state = .off
         preserveSizeOnSlotJumpMenuItem = preserveSizeOnSlotJumpItem
         viewMenu.addItem(preserveSizeOnSlotJumpItem)
 
@@ -298,12 +277,161 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         viewMenu.addItem(jumpToOriginItem)
         viewMenuItem.submenu = viewMenu
 
+        let navigateMenuItem = NSMenuItem()
+        mainMenu.addItem(navigateMenuItem)
+
+        let navigateMenu = NSMenu(title: "Navigate")
+
+        let navigateBackItem = NSMenuItem(
+            title: "Back",
+            action: #selector(navigateBack(_:)),
+            keyEquivalent: "["
+        )
+        navigateBackItem.keyEquivalentModifierMask = [.command]
+        navigateBackItem.target = self
+        navigateMenu.addItem(navigateBackItem)
+
+        let navigateForwardItem = NSMenuItem(
+            title: "Forward",
+            action: #selector(navigateForward(_:)),
+            keyEquivalent: "]"
+        )
+        navigateForwardItem.keyEquivalentModifierMask = [.command]
+        navigateForwardItem.target = self
+        navigateMenu.addItem(navigateForwardItem)
+
+        navigateMenu.addItem(.separator())
+
+        let jumpNextDisplayItem = NSMenuItem(
+            title: "Jump Next Display",
+            action: #selector(navigateJumpNextDisplay(_:)),
+            keyEquivalent: ""
+        )
+        jumpNextDisplayItem.target = self
+        navigateMenu.addItem(jumpNextDisplayItem)
+
+        let jumpPreviousDisplayItem = NSMenuItem(
+            title: "Jump Previous Display",
+            action: #selector(navigateJumpPreviousDisplay(_:)),
+            keyEquivalent: ""
+        )
+        jumpPreviousDisplayItem.target = self
+        navigateMenu.addItem(jumpPreviousDisplayItem)
+        navigateMenu.addItem(.separator())
+
+        let deselectTileItem = NSMenuItem(
+            title: "Deselect Tile",
+            action: #selector(navigateDeselectTile(_:)),
+            keyEquivalent: ""
+        )
+        deselectTileItem.target = self
+        navigateMenu.addItem(deselectTileItem)
+        navigateMenuItem.submenu = navigateMenu
+
+        let arrangeMenuItem = NSMenuItem()
+        mainMenu.addItem(arrangeMenuItem)
+
+        let arrangeMenu = NSMenu(title: "Arrange")
+
+        let arrangeColumnItem = NSMenuItem(
+            title: "Column",
+            action: #selector(arrangeColumnOnce(_:)),
+            keyEquivalent: ""
+        )
+        arrangeColumnItem.target = self
+        arrangeMenu.addItem(arrangeColumnItem)
+
+        let arrangeRowItem = NSMenuItem(
+            title: "Row",
+            action: #selector(arrangeRowOnce(_:)),
+            keyEquivalent: ""
+        )
+        arrangeRowItem.target = self
+        arrangeMenu.addItem(arrangeRowItem)
+
+        let arrangeSquareItem = NSMenuItem(
+            title: "Square",
+            action: #selector(arrangeSquareOnce(_:)),
+            keyEquivalent: ""
+        )
+        arrangeSquareItem.target = self
+        arrangeMenu.addItem(arrangeSquareItem)
+
+        arrangeMenu.addItem(.separator())
+
+        let autoArrangeSubmenuItem = NSMenuItem(title: "Auto Arrange", action: nil, keyEquivalent: "")
+        let autoArrangeSubmenu = NSMenu(title: "Auto Arrange")
+
+        let offItem = NSMenuItem(title: "Off", action: #selector(setAutoArrangeOff(_:)), keyEquivalent: "")
+        offItem.target = self
+        offItem.state = .on
+        autoArrangeOffItem = offItem
+        autoArrangeSubmenu.addItem(offItem)
+
+        let autoColumnItem = NSMenuItem(title: "Column", action: #selector(setAutoArrangeColumn(_:)), keyEquivalent: "")
+        autoColumnItem.target = self
+        autoArrangeColumnItem = autoColumnItem
+        autoArrangeSubmenu.addItem(autoColumnItem)
+
+        let autoRowItem = NSMenuItem(title: "Row", action: #selector(setAutoArrangeRow(_:)), keyEquivalent: "")
+        autoRowItem.target = self
+        autoArrangeRowItem = autoRowItem
+        autoArrangeSubmenu.addItem(autoRowItem)
+
+        let autoSquareItem = NSMenuItem(title: "Square", action: #selector(setAutoArrangeSquare(_:)), keyEquivalent: "")
+        autoSquareItem.target = self
+        autoArrangeSquareItem = autoSquareItem
+        autoArrangeSubmenu.addItem(autoSquareItem)
+
+        autoArrangeSubmenuItem.submenu = autoArrangeSubmenu
+        arrangeMenu.addItem(autoArrangeSubmenuItem)
+
+        arrangeMenu.addItem(.separator())
+
+        let arrangeSettingsItem = NSMenuItem(
+            title: "Arrange Settings\u{2026}",
+            action: #selector(showArrangeSettings(_:)),
+            keyEquivalent: ""
+        )
+        arrangeSettingsItem.target = self
+        arrangeMenu.addItem(arrangeSettingsItem)
+
+        arrangeMenuItem.submenu = arrangeMenu
+
+        let windowMenuItem = NSMenuItem()
+        mainMenu.addItem(windowMenuItem)
+
+        let windowMenu = NSMenu(title: "Window")
+        let minimizeItem = NSMenuItem(
+            title: "Minimize",
+            action: #selector(toggleMinimize(_:)),
+            keyEquivalent: "m"
+        )
+        minimizeItem.keyEquivalentModifierMask = [.command]
+        minimizeItem.target = self
+        minimizeMenuItem = minimizeItem
+        windowMenu.addItem(minimizeItem)
+        windowMenuItem.submenu = windowMenu
+
         let developerMenuItem = NSMenuItem()
         mainMenu.addItem(developerMenuItem)
 
         let developerMenu = NSMenu(title: "Developer")
         developerMenu.addItem(showDisplayIDsItem)
         developerMenuItem.submenu = developerMenu
+
+        let helpMenuItem = NSMenuItem()
+        mainMenu.addItem(helpMenuItem)
+
+        let helpMenu = NSMenu(title: "Help")
+        let helpItem = NSMenuItem(
+            title: "orcv Help",
+            action: #selector(NSApplication.showHelp(_:)),
+            keyEquivalent: "?"
+        )
+        helpMenu.addItem(helpItem)
+        helpMenuItem.submenu = helpMenu
+        NSApp.helpMenu = helpMenu
 
         NSApp.mainMenu = mainMenu
     }
@@ -437,6 +565,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc
+    private func navigateBack(_ sender: Any?) {
+        _ = sender
+        rootViewController?.menuNavigateBack()
+    }
+
+    @objc
+    private func navigateForward(_ sender: Any?) {
+        _ = sender
+        rootViewController?.menuNavigateForward()
+    }
+
+    @objc
     private func navigateJumpNextDisplay(_ sender: Any?) {
         _ = sender
         rootViewController?.menuJumpNextDisplay()
@@ -508,6 +648,101 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         swapResizeBehaviorMenuItem?.state = rootViewController?.menuSwapResizeBehaviorEnabled() == true ? .on : .off
     }
 
+    @objc
+    private func toggleMinimize(_ sender: Any?) {
+        _ = sender
+        guard let window else { return }
+        if window.isMiniaturized {
+            window.deminiaturize(nil)
+        } else {
+            window.miniaturize(nil)
+        }
+    }
+
+    @objc
+    private func arrangeColumnOnce(_ sender: Any?) {
+        _ = sender
+        rootViewController?.menuArrange(.column)
+    }
+
+    @objc
+    private func arrangeRowOnce(_ sender: Any?) {
+        _ = sender
+        rootViewController?.menuArrange(.row)
+    }
+
+    @objc
+    private func arrangeSquareOnce(_ sender: Any?) {
+        _ = sender
+        rootViewController?.menuArrange(.square)
+    }
+
+    @objc
+    private func setAutoArrangeOff(_ sender: Any?) {
+        _ = sender
+        rootViewController?.menuSetAutoArrangeMode(nil)
+        refreshAutoArrangeMenuState()
+    }
+
+    @objc
+    private func setAutoArrangeColumn(_ sender: Any?) {
+        _ = sender
+        rootViewController?.menuSetAutoArrangeMode(.column)
+        refreshAutoArrangeMenuState()
+    }
+
+    @objc
+    private func setAutoArrangeRow(_ sender: Any?) {
+        _ = sender
+        rootViewController?.menuSetAutoArrangeMode(.row)
+        refreshAutoArrangeMenuState()
+    }
+
+    @objc
+    private func setAutoArrangeSquare(_ sender: Any?) {
+        _ = sender
+        rootViewController?.menuSetAutoArrangeMode(.square)
+        refreshAutoArrangeMenuState()
+    }
+
+    @objc
+    private func showArrangeSettings(_ sender: Any?) {
+        _ = sender
+        guard let rootViewController else { return }
+        if arrangeSettingsWindowController == nil {
+            arrangeSettingsWindowController = ArrangeSettingsWindowController(
+                currentPadding: { [weak rootViewController] in
+                    rootViewController?.menuArrangePadding() ?? 8.0
+                },
+                onSave: { [weak rootViewController] padding in
+                    rootViewController?.menuSetArrangePadding(padding)
+                }
+            )
+        }
+        arrangeSettingsWindowController?.showWindow(nil)
+        arrangeSettingsWindowController?.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func refreshAutoArrangeMenuState() {
+        let current = rootViewController?.menuAutoArrangeMode()
+        autoArrangeOffItem?.state = current == nil ? .on : .off
+        autoArrangeColumnItem?.state = current == .column ? .on : .off
+        autoArrangeRowItem?.state = current == .row ? .on : .off
+        autoArrangeSquareItem?.state = current == .square ? .on : .off
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem == minimizeMenuItem {
+            menuItem.title = window?.isMiniaturized == true ? "Restore" : "Minimize"
+        }
+        if menuItem == autoArrangeOffItem || menuItem == autoArrangeColumnItem
+            || menuItem == autoArrangeRowItem || menuItem == autoArrangeSquareItem {
+            refreshAutoArrangeMenuState()
+        }
+        return true
+    }
+
     func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? {
         _ = window
         return rootViewController?.undoManager
@@ -528,6 +763,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let eventWindow = notification.object as? NSWindow else { return }
         guard eventWindow == window else { return }
         rootViewController?.windowDidEndLiveResize(eventWindow)
+    }
+
+    private func syncMinimizeMenuShortcut() {
+        guard let minimizeMenuItem, let shortcutManager else { return }
+        if let equiv = shortcutManager.menuKeyEquivalent(for: .minimizeWindow) {
+            minimizeMenuItem.keyEquivalent = equiv.key
+            minimizeMenuItem.keyEquivalentModifierMask = equiv.modifiers
+        } else {
+            minimizeMenuItem.keyEquivalent = ""
+            minimizeMenuItem.keyEquivalentModifierMask = []
+        }
     }
 
     private func showMainWindowWhenReady() {
@@ -857,7 +1103,7 @@ private final class PermissionGateWindowController: NSWindowController {
 
 private final class OrcvAboutWindowController: NSWindowController {
     private static let githubURL = URL(string: "https://github.com/jasonjmcghee/orcv")
-    private static let tagline = "orcv is an infinite-desktop control surface for orchestrating many visual tasks at once"
+    private static let tagline = "orcv is an infinite-desktop control surface for visually orchestrating many tasks at once"
 
     init() {
         let window = NSWindow(

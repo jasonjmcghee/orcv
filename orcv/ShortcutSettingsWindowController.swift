@@ -239,12 +239,16 @@ final class ShortcutSettingsWindowController: NSWindowController {
         buttonRow.spacing = 10
         buttonRow.translatesAutoresizingMaskIntoConstraints = false
 
+        let reloadButton = NSButton(title: "Reload from File", target: self, action: #selector(reloadFromFilePressed))
+        reloadButton.bezelStyle = .rounded
+
         let cancelButton = NSButton(title: "Cancel", target: self, action: #selector(cancelPressed))
         cancelButton.bezelStyle = .rounded
 
         let saveButton = NSButton(title: "Save", target: self, action: #selector(savePressed))
         saveButton.bezelStyle = .rounded
 
+        buttonRow.addArrangedSubview(reloadButton)
         buttonRow.addArrangedSubview(cancelButton)
         buttonRow.addArrangedSubview(saveButton)
         root.addSubview(buttonRow)
@@ -290,6 +294,18 @@ final class ShortcutSettingsWindowController: NSWindowController {
         )
         shortcutManager.updateBindings(stagedBindings)
         close()
+    }
+
+    @objc
+    private func reloadFromFilePressed() {
+        stopRecording()
+        shortcutManager.reloadFromDisk()
+        reloadStagedBindingsFromManager()
+        refreshDisplayedBindings()
+        refreshScalingResizeModifierUI()
+        refreshZoomModifierUI()
+        refreshJumpToSlotModifierUI()
+        refreshSavepointModifierUI()
     }
 
     @objc

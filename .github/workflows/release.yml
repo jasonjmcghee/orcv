@@ -1,6 +1,9 @@
 name: Release
 
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       version:
@@ -15,6 +18,15 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolve version
+        run: |
+          if [ -n "${{ env.VERSION }}" ]; then
+            echo "VERSION=${{ env.VERSION }}" >> "$GITHUB_ENV"
+          else
+            # Strip leading "v" from the tag name.
+            echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          fi
 
       - name: Select Xcode
         uses: maxim-lobanov/setup-xcode@v1
@@ -74,7 +86,7 @@ jobs:
             CODE_SIGN_STYLE=Manual \
             CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
             CODE_SIGN_IDENTITY="$SIGNING_IDENTITY" \
-            OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN_FILE" \
+            OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN_FILE --options=runtime" \
             build
 
           ditto build/DerivedData/Build/Products/Release/orcv.app build/orcv.app
@@ -84,23 +96,76 @@ jobs:
             exit 1
           fi
 
+          # Verify hardened runtime flag is set (required for notarization).
+          if ! codesign -dv --verbose=4 build/orcv.app 2>&1 | grep -q 'runtime'; then
+            echo "error: hardened runtime flag not set on signed app" >&2
+            exit 1
+          fi
+
+      - name: Notarize app
+        env:
+          NOTARIZE_APPLE_ID: ${{ secrets.NOTARIZE_APPLE_ID }}
+          NOTARIZE_PASSWORD: ${{ secrets.NOTARIZE_PASSWORD }}
+          NOTARIZE_TEAM_ID: ${{ secrets.NOTARIZE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+
+          # Create a temporary zip for notarization submission.
+          ditto -c -k --keepParent build/orcv.app build/orcv-notarize.zip
+
+          echo "Submitting for notarization..."
+          xcrun notarytool submit build/orcv-notarize.zip \
+            --apple-id "$NOTARIZE_APPLE_ID" \
+            --password "$NOTARIZE_PASSWORD" \
+            --team-id "$NOTARIZE_TEAM_ID" \
+            --wait \
+            --timeout 30m
+
+          echo "Stapling notarization ticket..."
+          xcrun stapler staple build/orcv.app
+
+          # Verify the staple took effect.
+          xcrun stapler validate build/orcv.app
+
+          rm -f build/orcv-notarize.zip
+
       - name: Create DMG
         run: |
           test -f "$PWD/assets/dmg/.DS_Store"
           chmod +x ./create_dmg.sh
           ./create_dmg.sh \
             "$PWD/build/orcv.app" \
-            "$PWD/build/orcv-${{ inputs.version }}.dmg" \
+            "$PWD/build/orcv-${{ env.VERSION }}.dmg" \
             "orcv"
+
+      - name: Notarize DMG
+        env:
+          NOTARIZE_APPLE_ID: ${{ secrets.NOTARIZE_APPLE_ID }}
+          NOTARIZE_PASSWORD: ${{ secrets.NOTARIZE_PASSWORD }}
+          NOTARIZE_TEAM_ID: ${{ secrets.NOTARIZE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+
+          echo "Submitting DMG for notarization..."
+          xcrun notarytool submit "build/orcv-${{ env.VERSION }}.dmg" \
+            --apple-id "$NOTARIZE_APPLE_ID" \
+            --password "$NOTARIZE_PASSWORD" \
+            --team-id "$NOTARIZE_TEAM_ID" \
+            --wait \
+            --timeout 30m
+
+          echo "Stapling notarization ticket to DMG..."
+          xcrun stapler staple "build/orcv-${{ env.VERSION }}.dmg"
+          xcrun stapler validate "build/orcv-${{ env.VERSION }}.dmg"
 
       - name: Verify DMG root contents
         run: |
           set -euo pipefail
           MNT="$(mktemp -d /tmp/orcv-dmg-verify.XXXXXX)"
-          hdiutil attach "$PWD/build/orcv-${{ inputs.version }}.dmg" -mountpoint "$MNT" -nobrowse -quiet
+          hdiutil attach "$PWD/build/orcv-${{ env.VERSION }}.dmg" -mountpoint "$MNT" -nobrowse -quiet
           ls -la "$MNT"
           test -d "$MNT/orcv.app"
-          test -e "$MNT/Applications"
+          test -L "$MNT/Applications"
           hdiutil detach "$MNT" -quiet
           rmdir "$MNT"
 
@@ -108,9 +173,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "v${{ inputs.version }}" \
-            build/orcv-${{ inputs.version }}.dmg \
-            --title "orcv v${{ inputs.version }}" \
+          gh release create "v${{ env.VERSION }}" \
+            build/orcv-${{ env.VERSION }}.dmg \
+            --title "orcv v${{ env.VERSION }}" \
             --generate-notes
 
       - name: Cleanup keychain
