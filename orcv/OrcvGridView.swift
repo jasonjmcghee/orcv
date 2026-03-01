@@ -49,6 +49,17 @@ final class OrcvGridView: NSView {
         }
     }
 
+    var sharpCornersEnabled: Bool = false {
+        didSet {
+            guard oldValue != sharpCornersEnabled else { return }
+            tileCornerRadius = sharpCornersEnabled ? 0.0 : 2.0
+            for (_, layers) in tileLayers {
+                layers.root.cornerRadius = tileCornerRadius
+                layers.preview.cornerRadius = max(0, tileCornerRadius - 1.5)
+            }
+        }
+    }
+
     var layoutMode: WorkspaceLayoutMode = .canvas {
         didSet {
             guard oldValue != layoutMode else { return }
@@ -126,7 +137,7 @@ final class OrcvGridView: NSView {
     private let horizontalPadding: CGFloat = 12.0
     private let verticalPadding: CGFloat = 0.0
     private let spacing: CGFloat = 8.0
-    private let tileCornerRadius: CGFloat = 2.0
+    private var tileCornerRadius: CGFloat = 2.0
     private let wrapTolerance: CGFloat = 0.5
     private let displayIDFont = NSFont.systemFont(ofSize: 14, weight: .semibold)
 

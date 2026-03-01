@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var preserveSizeOnSlotJumpMenuItem: NSMenuItem?
     private var restoreWindowFrameOnSavepointRecallMenuItem: NSMenuItem?
     private var swapResizeBehaviorMenuItem: NSMenuItem?
+    private var sharpCornersMenuItem: NSMenuItem?
     private var minimizeMenuItem: NSMenuItem?
     private var autoArrangeOffItem: NSMenuItem?
     private var autoArrangeColumnItem: NSMenuItem?
@@ -256,6 +257,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         swapResizeBehaviorItem.state = .off
         swapResizeBehaviorMenuItem = swapResizeBehaviorItem
         viewMenu.addItem(swapResizeBehaviorItem)
+
+        let sharpCornersItem = NSMenuItem(
+            title: "Sharp Corners",
+            action: #selector(toggleSharpCorners(_:)),
+            keyEquivalent: ""
+        )
+        sharpCornersItem.target = self
+        sharpCornersItem.state = .off
+        sharpCornersMenuItem = sharpCornersItem
+        viewMenu.addItem(sharpCornersItem)
 
         viewMenu.addItem(.separator())
 
@@ -649,6 +660,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     @objc
+    private func toggleSharpCorners(_ sender: Any?) {
+        _ = sender
+        rootViewController?.menuToggleSharpCorners()
+        sharpCornersMenuItem?.state = rootViewController?.menuSharpCornersEnabled() == true ? .on : .off
+        if let window {
+            applyChromelessWindowStyle(window)
+        }
+    }
+
+    @objc
     private func toggleMinimize(_ sender: Any?) {
         _ = sender
         guard let window else { return }
@@ -765,6 +786,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         rootViewController?.windowDidEndLiveResize(eventWindow)
     }
 
+    func windowWillMove(_ notification: Notification) {
+        guard let eventWindow = notification.object as? NSWindow else { return }
+        guard eventWindow == window else { return }
+        rootViewController?.windowWillMove(eventWindow)
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        guard let eventWindow = notification.object as? NSWindow else { return }
+        guard eventWindow == window else { return }
+        rootViewController?.windowDidMove(eventWindow)
+    }
+
     private func syncMinimizeMenuShortcut() {
         guard let minimizeMenuItem, let shortcutManager else { return }
         if let equiv = shortcutManager.menuKeyEquivalent(for: .minimizeWindow) {
@@ -787,6 +820,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         preserveSizeOnSlotJumpMenuItem?.state = rootViewController?.menuPreserveSizeOnSlotJumpEnabled() == true ? .on : .off
         restoreWindowFrameOnSavepointRecallMenuItem?.state = rootViewController?.menuRestoreWindowFrameOnSavepointRecallEnabled() == true ? .on : .off
         swapResizeBehaviorMenuItem?.state = rootViewController?.menuSwapResizeBehaviorEnabled() == true ? .on : .off
+        sharpCornersMenuItem?.state = rootViewController?.menuSharpCornersEnabled() == true ? .on : .off
         DispatchQueue.main.async { [weak self] in
             guard let window = self?.window else { return }
             self?.applyChromelessWindowStyle(window)
@@ -796,14 +830,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self?.preserveSizeOnSlotJumpMenuItem?.state = self?.rootViewController?.menuPreserveSizeOnSlotJumpEnabled() == true ? .on : .off
             self?.restoreWindowFrameOnSavepointRecallMenuItem?.state = self?.rootViewController?.menuRestoreWindowFrameOnSavepointRecallEnabled() == true ? .on : .off
             self?.swapResizeBehaviorMenuItem?.state = self?.rootViewController?.menuSwapResizeBehaviorEnabled() == true ? .on : .off
+            self?.sharpCornersMenuItem?.state = self?.rootViewController?.menuSharpCornersEnabled() == true ? .on : .off
         }
         NSApp.activate(ignoringOtherApps: true)
     }
 
     private func applyChromelessWindowStyle(_ window: NSWindow) {
+        let sharpCorners = rootViewController?.menuSharpCornersEnabled() == true
+        let targetStyleMask: NSWindow.StyleMask = sharpCorners
+            ? [.borderless, .resizable, .miniaturizable, .fullSizeContentView]
+            : [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+        if window.styleMask != targetStyleMask {
+            let frame = window.frame
+            window.styleMask = targetStyleMask
+            window.setFrame(frame, display: false)
+        }
+
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .none
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = true
         let buttons = [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton]
         for kind in buttons {
             guard let button = window.standardWindowButton(kind) else { continue }
@@ -816,6 +864,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             titlebarContainer.isHidden = true
             titlebarContainer.alphaValue = 0.0
         }
+
     }
 }
 

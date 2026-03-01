@@ -9,6 +9,11 @@ final class WorkspaceRootViewController: NSViewController {
         let origin: CGPoint
     }
 
+    private struct CameraHistoryEntry {
+        let camera: CanvasCameraState
+        let windowFrame: CGRect?
+    }
+
     private struct CanvasSavepoint {
         let camera: CanvasCameraState
         let windowFrame: CGRect?
@@ -34,6 +39,9 @@ final class WorkspaceRootViewController: NSViewController {
     private let canvasBackdropView = NSVisualEffectView(frame: .zero)
     private let tileStatusOverlay = NSVisualEffectView(frame: .zero)
     private let tileStatusLabel = NSTextField(labelWithString: "")
+    private let toastContainer = NSView(frame: .zero)
+    private let toastLabel = NSTextField(labelWithString: "")
+    private var toastDismissWorkItem: DispatchWorkItem?
     private let emptyStateLabel = NSTextField(wrappingLabelWithString: "")
     private let actionUndoManager = UndoManager()
 
@@ -87,9 +95,10 @@ final class WorkspaceRootViewController: NSViewController {
     private(set) var arrangePadding: CGFloat = 2.0
     private(set) var autoArrangeMode: ArrangeMode?
     private var pendingScrollZoomDelta: CGFloat = 0.0
-    private var cameraHistory: [CanvasCameraState] = []
+    private var cameraHistory: [CameraHistoryEntry] = []
     private var cameraHistoryCursor: Int = -1
     private var isNavigatingHistory = false
+    private var hasUsedAdjacentJumpSinceBootstrap = false
 
     var onInitialBootstrapComplete: (() -> Void)?
 
@@ -209,10 +218,25 @@ final class WorkspaceRootViewController: NSViewController {
 
         tileStatusOverlay.addSubview(tileStatusLabel)
 
+        toastContainer.translatesAutoresizingMaskIntoConstraints = false
+        toastContainer.wantsLayer = true
+        toastContainer.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.80).cgColor
+        toastContainer.layer?.cornerRadius = 8.0
+        toastContainer.isHidden = true
+
+        toastLabel.translatesAutoresizingMaskIntoConstraints = false
+        toastLabel.font = NSFont.systemFont(ofSize: 14, weight: .medium)
+        toastLabel.textColor = .white
+        toastLabel.alignment = .center
+        toastLabel.lineBreakMode = .byWordWrapping
+        toastLabel.maximumNumberOfLines = 0
+        toastContainer.addSubview(toastLabel)
+
         view.addSubview(canvasBackdropView)
         view.addSubview(gridView)
         view.addSubview(emptyStateLabel)
         view.addSubview(tileStatusOverlay)
+        view.addSubview(toastContainer)
 
         NSLayoutConstraint.activate([
             canvasBackdropView.topAnchor.constraint(equalTo: view.topAnchor),
@@ -238,6 +262,15 @@ final class WorkspaceRootViewController: NSViewController {
 
             tileStatusLabel.centerXAnchor.constraint(equalTo: tileStatusOverlay.centerXAnchor),
             tileStatusLabel.centerYAnchor.constraint(equalTo: tileStatusOverlay.centerYAnchor),
+
+            toastContainer.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            toastContainer.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            toastContainer.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor, multiplier: 0.8),
+
+            toastLabel.topAnchor.constraint(equalTo: toastContainer.topAnchor, constant: 16),
+            toastLabel.bottomAnchor.constraint(equalTo: toastContainer.bottomAnchor, constant: -16),
+            toastLabel.leadingAnchor.constraint(equalTo: toastContainer.leadingAnchor, constant: 24),
+            toastLabel.trailingAnchor.constraint(equalTo: toastContainer.trailingAnchor, constant: -24),
         ])
 
         applyInteractionMode()
@@ -529,12 +562,21 @@ final class WorkspaceRootViewController: NSViewController {
     }
 
     @objc
-    private func handleRemoveFocused() {
-        guard let focused = workspaceStore.focusedWorkspace, focused.kind == .virtual else {
-            NSSound.beep()
+    private func handleRemoveHovered() {
+        guard let window = view.window else { return }
+        let mouseInScreen = NSEvent.mouseLocation
+        guard isPointerDirectlyOverWindow(window: window, screenPoint: mouseInScreen) else { return }
+        let pointInWindow = window.convertPoint(fromScreen: mouseInScreen)
+        let pointInGrid = gridView.convert(pointInWindow, from: nil)
+
+        guard let hit = gridView.hitTestWorkspace(at: pointInGrid),
+              let workspace = workspaceStore.workspace(with: hit.workspaceID),
+              workspace.kind == .virtual else {
+            let shortcutLabel = shortcutManager.displayString(for: .removeDisplay)
+            showToast("Hover over the desired desktop and then press \(shortcutLabel) to close")
             return
         }
-        guard let removed = removeVirtualWorkspace(workspaceID: focused.id) else {
+        guard let removed = removeVirtualWorkspace(workspaceID: workspace.id) else {
             NSSound.beep()
             return
         }
@@ -570,7 +612,7 @@ final class WorkspaceRootViewController: NSViewController {
     }
 
     func menuRemoveFocusedDisplay() {
-        handleRemoveFocused()
+        handleRemoveHovered()
     }
 
     func menuToggleTeleport() {
@@ -647,6 +689,16 @@ final class WorkspaceRootViewController: NSViewController {
         swapResizeBehaviorEnabled
     }
 
+    func menuToggleSharpCorners() {
+        let enabled = !gridView.sharpCornersEnabled
+        gridView.sharpCornersEnabled = enabled
+        scheduleStateSave()
+    }
+
+    func menuSharpCornersEnabled() -> Bool {
+        gridView.sharpCornersEnabled
+    }
+
     func menuArrange(_ mode: ArrangeMode) {
         performArrange(mode)
     }
@@ -701,25 +753,6 @@ final class WorkspaceRootViewController: NSViewController {
         if pushHistory {
             registerUndoForArrange(from: oldOrigins, to: newOrigins)
         }
-
-        // Jump viewport to the top-left-most tile (same alignment as jump-next).
-        if let topLeftID = topLeftMostWorkspaceID(from: newOrigins) {
-            _ = jumpCameraToWorkspace(
-                workspaceID: topLeftID,
-                fitWidth: false,
-                alignTopLeft: true,
-                pushHistory: pushHistory
-            )
-        }
-    }
-
-    private func topLeftMostWorkspaceID(from origins: [UUID: CGPoint]) -> UUID? {
-        origins.min(by: { a, b in
-            if abs(a.value.y - b.value.y) > 1.0 {
-                return a.value.y > b.value.y  // larger Y = higher on screen = "top"
-            }
-            return a.value.x < b.value.x
-        })?.key
     }
 
     private func autoArrangeIfNeeded() {
@@ -731,6 +764,38 @@ final class WorkspaceRootViewController: NSViewController {
         guard window == view.window else { return }
         liveResizeStartWindowFrame = window.frame
         liveResizeStartCanvasCamera = currentCanvasCameraState() ?? lastCanvasCamera
+    }
+
+    private var moveStartWindowFrame: CGRect?
+    private var moveUndoWorkItem: DispatchWorkItem?
+
+    func windowWillMove(_ window: NSWindow) {
+        guard window == view.window else { return }
+        if moveStartWindowFrame == nil {
+            moveStartWindowFrame = window.frame
+        }
+    }
+
+    func windowDidMove(_ window: NSWindow) {
+        guard window == view.window else { return }
+        guard !suppressWindowResizeUndoRegistration else { return }
+        moveUndoWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, let before = self.moveStartWindowFrame else { return }
+            self.moveStartWindowFrame = nil
+            let after = window.frame
+            guard self.windowFramesDiffer(before, after) else { return }
+            let camera = self.currentCanvasCameraState() ?? self.lastCanvasCamera
+            self.registerWindowResizeUndo(
+                from: before,
+                to: after,
+                beforeCamera: camera,
+                afterCamera: camera,
+                actionName: "Move Window"
+            )
+        }
+        moveUndoWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
 
     func windowDidEndLiveResize(_ window: NSWindow) {
@@ -799,6 +864,7 @@ final class WorkspaceRootViewController: NSViewController {
         actionUndoManager.registerUndo(withTarget: self) { target in
             guard let removed = target.removeVirtualWorkspace(workspaceID: workspaceID) else { return }
             target.registerUndoForDelete(removed: removed.workspace, index: removed.index, actionName: actionName)
+            target.autoArrangeIfNeeded()
         }
         actionUndoManager.setActionName(actionName)
     }
@@ -816,6 +882,7 @@ final class WorkspaceRootViewController: NSViewController {
                 at: snapshot.index
             ) else { return }
             target.registerUndoForCreate(workspaceID: recreated.id, actionName: actionName)
+            target.autoArrangeIfNeeded()
         }
         actionUndoManager.setActionName(actionName)
     }
@@ -826,6 +893,7 @@ final class WorkspaceRootViewController: NSViewController {
             target.scheduleArrangementSync()
             target.scheduleStateSave()
             target.registerUndoForMove(workspaceID: workspaceID, from: newOrigin, to: oldOrigin)
+            target.autoArrangeIfNeeded()
         }
         actionUndoManager.setActionName("Move Tile")
     }
@@ -1356,7 +1424,7 @@ final class WorkspaceRootViewController: NSViewController {
             handleNewDisplay()
             return true
         case .removeDisplay:
-            handleRemoveFocused()
+            handleRemoveHovered()
             return true
         case .fullscreenSelected:
             openFullscreenForHoveredWorkspace()
@@ -1383,9 +1451,9 @@ final class WorkspaceRootViewController: NSViewController {
 
     private func actionRequiresFocusedWindow(_ action: ShortcutAction) -> Bool {
         switch action {
-        case .toggleTeleport, .windowFollowHold, .minimizeWindow, .navigateBack, .navigateForward:
+        case .toggleTeleport, .windowFollowHold, .minimizeWindow, .navigateBack, .navigateForward, .removeDisplay:
             return false
-        case .newDisplay, .removeDisplay, .fullscreenSelected, .jumpNextDisplay, .jumpPreviousDisplay, .deselectTile:
+        case .newDisplay, .fullscreenSelected, .jumpNextDisplay, .jumpPreviousDisplay, .deselectTile:
             return true
         }
     }
@@ -1864,6 +1932,7 @@ final class WorkspaceRootViewController: NSViewController {
         guard index >= 0, index < workspaces.count else { return false }
         let sourceWorkspaceID = workspaceStore.focusedWorkspaceID
         let target = workspaces[index]
+        hasUsedAdjacentJumpSinceBootstrap = true
         workspaceStore.selectOnly(workspaceID: target.id)
         return jumpCameraToWorkspace(
             workspaceID: target.id,
@@ -1878,12 +1947,26 @@ final class WorkspaceRootViewController: NSViewController {
         guard !workspaces.isEmpty else { return false }
         guard step != 0 else { return false }
 
+        if !hasUsedAdjacentJumpSinceBootstrap {
+            let sourceWorkspaceID = workspaceStore.focusedWorkspaceID
+            let target = step > 0 ? workspaces[0] : workspaces[workspaces.count - 1]
+            hasUsedAdjacentJumpSinceBootstrap = true
+            workspaceStore.selectOnly(workspaceID: target.id)
+            return jumpCameraToWorkspace(
+                workspaceID: target.id,
+                fitWidth: !preserveSizeOnSlotJumpEnabled,
+                alignTopLeft: !centerTileOnJumpEnabled,
+                preserveViewportOffsetFromWorkspaceID: preserveSizeOnSlotJumpEnabled ? sourceWorkspaceID : nil
+            )
+        }
+
         let sourceWorkspaceID = workspaceStore.focusedWorkspaceID
         let currentIndex = workspaceStore.focusedWorkspaceID
             .flatMap { focusedID in workspaces.firstIndex(where: { $0.id == focusedID }) } ?? 0
         let count = workspaces.count
         let wrappedIndex = ((currentIndex + step) % count + count) % count
         let target = workspaces[wrappedIndex]
+        hasUsedAdjacentJumpSinceBootstrap = true
         workspaceStore.selectOnly(workspaceID: target.id)
         return jumpCameraToWorkspace(
             workspaceID: target.id,
@@ -1951,11 +2034,20 @@ final class WorkspaceRootViewController: NSViewController {
 
     private func pushCameraHistory() {
         guard let camera = currentCanvasCameraState() ?? lastCanvasCamera else { return }
+        // Skip if identical to current top of stack.
+        if let last = cameraHistory.last,
+           cameraHistoryCursor == cameraHistory.count - 1,
+           abs(last.camera.origin.x - camera.origin.x) < 0.5,
+           abs(last.camera.origin.y - camera.origin.y) < 0.5,
+           abs(last.camera.magnification - camera.magnification) < 0.001 {
+            return
+        }
+        let entry = CameraHistoryEntry(camera: camera, windowFrame: view.window?.frame)
         // Truncate any forward history
         if cameraHistoryCursor < cameraHistory.count - 1 {
             cameraHistory.removeSubrange((cameraHistoryCursor + 1)...)
         }
-        cameraHistory.append(camera)
+        cameraHistory.append(entry)
         // Cap at limit
         if cameraHistory.count > 50 {
             cameraHistory.removeFirst(cameraHistory.count - 50)
@@ -1964,16 +2056,18 @@ final class WorkspaceRootViewController: NSViewController {
     }
 
     private func navigateCameraBack() -> Bool {
-        guard cameraHistoryCursor > 0 else { return false }
-        // Save current position as forward entry if we're at the end
+        guard cameraHistoryCursor >= 0, !cameraHistory.isEmpty else { return false }
+        // If at the end of the stack, append current position so Forward can return here.
         if cameraHistoryCursor == cameraHistory.count - 1,
            let current = currentCanvasCameraState() ?? lastCanvasCamera {
-            // Replace the entry at cursor with current state (may have panned since last push)
-            cameraHistory[cameraHistoryCursor] = current
+            let entry = CameraHistoryEntry(camera: current, windowFrame: view.window?.frame)
+            cameraHistory.append(entry)
+            cameraHistoryCursor = cameraHistory.count - 1
         }
+        guard cameraHistoryCursor > 0 else { return false }
         cameraHistoryCursor -= 1
         isNavigatingHistory = true
-        applyCanvasCamera(cameraHistory[cameraHistoryCursor])
+        applyCameraHistoryEntry(cameraHistory[cameraHistoryCursor])
         isNavigatingHistory = false
         scheduleStateSave()
         return true
@@ -1983,10 +2077,22 @@ final class WorkspaceRootViewController: NSViewController {
         guard cameraHistoryCursor < cameraHistory.count - 1 else { return false }
         cameraHistoryCursor += 1
         isNavigatingHistory = true
-        applyCanvasCamera(cameraHistory[cameraHistoryCursor])
+        applyCameraHistoryEntry(cameraHistory[cameraHistoryCursor])
         isNavigatingHistory = false
         scheduleStateSave()
         return true
+    }
+
+    private func applyCameraHistoryEntry(_ entry: CameraHistoryEntry) {
+        if let window = view.window, let frame = entry.windowFrame, frame != window.frame {
+            suppressWindowResizeUndoRegistration = true
+            suppressProgrammaticWindowResizeCameraAdjustment = true
+            window.setFrame(frame, display: true, animate: false)
+            lastObservedWindowFrame = frame
+            suppressProgrammaticWindowResizeCameraAdjustment = false
+            suppressWindowResizeUndoRegistration = false
+        }
+        applyCanvasCamera(entry.camera)
     }
 
     private func ensureVisibleWorkspaceAfterBootstrap() {
@@ -2019,16 +2125,13 @@ final class WorkspaceRootViewController: NSViewController {
             ?? lastCanvasCamera
             ?? defaultCanvasCameraState() else { return false }
 
-        let ref = savepointReferenceTile()
-        let offset: CGPoint?
-        if let refID = ref, let origin = workspaceStore.workspace(with: refID)?.canvasOrigin {
-            offset = CGPoint(
-                x: camera.origin.x - origin.x,
-                y: camera.origin.y - origin.y
-            )
-        } else {
-            offset = nil
-        }
+        layoutGridDocumentView()
+        view.layoutSubtreeIfNeeded()
+        materializeUnpositionedCanvasOriginsIfNeeded()
+
+        let anchor = resolvedSavepointAnchor(for: camera, preferredReferenceID: savepointReferenceTile())
+        let ref = anchor?.id
+        let offset = anchor?.offset
 
         let savepoint = CanvasSavepoint(
             camera: camera,
@@ -2043,6 +2146,8 @@ final class WorkspaceRootViewController: NSViewController {
     }
 
     /// Find the most-visible tile, breaking ties by top-left position.
+    /// If no tile is visible, fall back to focused tile (or first tile) so
+    /// savepoints still get a stable relative anchor.
     private func savepointReferenceTile() -> UUID? {
         let viewport = gridView.bounds
         guard viewport.width > 1, viewport.height > 1 else { return nil }
@@ -2058,8 +2163,8 @@ final class WorkspaceRootViewController: NSViewController {
                 if area > current.visibleArea + 1.0 {
                     best = (workspace.id, area, origin)
                 } else if abs(area - current.visibleArea) <= 1.0 {
-                    // Tie-break: prefer top-left-most.
-                    if origin.y < current.origin.y - 1.0
+                    // Tie-break: prefer top-left-most (larger Y = higher in AppKit).
+                    if origin.y > current.origin.y + 1.0
                         || (abs(origin.y - current.origin.y) <= 1.0 && origin.x < current.origin.x) {
                         best = (workspace.id, area, origin)
                     }
@@ -2068,7 +2173,14 @@ final class WorkspaceRootViewController: NSViewController {
                 best = (workspace.id, area, origin)
             }
         }
-        return best?.id
+        if let bestID = best?.id {
+            return bestID
+        }
+        if let focusedID = workspaceStore.focusedWorkspaceID,
+           workspaceStore.workspace(with: focusedID) != nil {
+            return focusedID
+        }
+        return workspaceStore.workspaces.first?.id
     }
 
     private func recallCanvasSavepoint(slot: Int) -> Bool {
@@ -2091,7 +2203,8 @@ final class WorkspaceRootViewController: NSViewController {
         var resolvedCamera = savepoint.camera
         if let refID = savepoint.referenceTileID,
            let offset = savepoint.cameraOffsetFromTile,
-           let currentOrigin = workspaceStore.workspace(with: refID)?.canvasOrigin {
+           let currentOrigin = workspaceStore.workspace(with: refID)?.canvasOrigin
+            ?? gridView.frameForWorkspaceInWorld(refID)?.origin {
             resolvedCamera = CanvasCameraState(
                 magnification: savepoint.camera.magnification,
                 origin: CGPoint(
@@ -2117,15 +2230,21 @@ final class WorkspaceRootViewController: NSViewController {
 
     private func persistedCanvasSavepoints() -> [String: PersistedWorkspaceState.CameraBookmark]? {
         guard !canvasSavepoints.isEmpty else { return nil }
+        let virtualWorkspaceIDs = workspaceStore.workspaces
+            .filter { $0.kind == .virtual }
+            .map(\.id)
         var encoded: [String: PersistedWorkspaceState.CameraBookmark] = [:]
         for (slot, savepoint) in canvasSavepoints where (0...9).contains(slot) {
             let frame = savepoint.windowFrame
             let refSerial: UInt32?
+            let refIndex: Int?
             if let refID = savepoint.referenceTileID,
                let workspace = workspaceStore.workspace(with: refID) {
                 refSerial = displayManager.virtualDisplaySerial(for: workspace.displayID)
+                refIndex = virtualWorkspaceIDs.firstIndex(of: refID)
             } else {
                 refSerial = nil
+                refIndex = nil
             }
             encoded[String(slot)] = PersistedWorkspaceState.CameraBookmark(
                 magnification: Double(savepoint.camera.magnification),
@@ -2136,6 +2255,7 @@ final class WorkspaceRootViewController: NSViewController {
                 windowWidth: frame.map { Double($0.size.width) },
                 windowHeight: frame.map { Double($0.size.height) },
                 referenceTileSerial: refSerial,
+                referenceTileIndex: refIndex,
                 tileOffsetX: savepoint.cameraOffsetFromTile.map { Double($0.x) },
                 tileOffsetY: savepoint.cameraOffsetFromTile.map { Double($0.y) }
             )
@@ -2143,16 +2263,48 @@ final class WorkspaceRootViewController: NSViewController {
         return encoded.isEmpty ? nil : encoded
     }
 
-    private func restoredCanvasSavepoints(from persisted: PersistedWorkspaceState) -> [Int: CanvasSavepoint] {
-        guard let raw = persisted.canvasSavepoints, !raw.isEmpty else { return [:] }
+    private func resolvedSavepointAnchor(
+        for camera: CanvasCameraState,
+        preferredReferenceID: UUID?
+    ) -> (id: UUID, offset: CGPoint)? {
+        var candidateIDs: [UUID] = []
+        if let preferredReferenceID {
+            candidateIDs.append(preferredReferenceID)
+        }
+        if let visibleReference = savepointReferenceTile(),
+           !candidateIDs.contains(visibleReference) {
+            candidateIDs.append(visibleReference)
+        }
+        if let focusedID = workspaceStore.focusedWorkspaceID,
+           !candidateIDs.contains(focusedID) {
+            candidateIDs.append(focusedID)
+        }
+        for workspace in workspaceStore.workspaces where !candidateIDs.contains(workspace.id) {
+            candidateIDs.append(workspace.id)
+        }
 
-        // Build serial→UUID lookup from the just-restored workspaces.
-        var workspaceIDBySerial: [UInt32: UUID] = [:]
-        for workspace in workspaceStore.workspaces {
-            if let serial = displayManager.virtualDisplaySerial(for: workspace.displayID) {
-                workspaceIDBySerial[serial] = workspace.id
+        for id in candidateIDs {
+            if let origin = workspaceStore.workspace(with: id)?.canvasOrigin
+                ?? gridView.frameForWorkspaceInWorld(id)?.origin {
+                return (
+                    id: id,
+                    offset: CGPoint(
+                        x: camera.origin.x - origin.x,
+                        y: camera.origin.y - origin.y
+                    )
+                )
             }
         }
+        return nil
+    }
+
+    private func restoredCanvasSavepoints(
+        from persisted: PersistedWorkspaceState,
+        serialToID: [UInt32: UUID],
+        indexToID: [UUID]
+    ) -> [Int: CanvasSavepoint] {
+        guard let raw = persisted.canvasSavepoints, !raw.isEmpty else { return [:] }
+        let workspaceIDBySerial = serialToID
 
         var decoded: [Int: CanvasSavepoint] = [:]
         for (slotKey, bookmark) in raw {
@@ -2175,22 +2327,35 @@ final class WorkspaceRootViewController: NSViewController {
                 magnification: magnification,
                 origin: CGPoint(x: x, y: y)
             )
-            let referenceTileID: UUID?
-            let tileOffset: CGPoint?
-            if let serial = bookmark.referenceTileSerial,
-               let tx = bookmark.tileOffsetX, let ty = bookmark.tileOffsetY,
-               tx.isFinite, ty.isFinite {
-                referenceTileID = workspaceIDBySerial[serial]
-                tileOffset = CGPoint(x: tx, y: ty)
+            let tileOffset: CGPoint? = {
+                guard let tx = bookmark.tileOffsetX, let ty = bookmark.tileOffsetY,
+                      tx.isFinite, ty.isFinite else {
+                    return nil
+                }
+                return CGPoint(x: tx, y: ty)
+            }()
+            let referenceTileID: UUID? = {
+                if let serial = bookmark.referenceTileSerial,
+                   let id = workspaceIDBySerial[serial] {
+                    return id
+                }
+                if let idx = bookmark.referenceTileIndex,
+                   idx >= 0, idx < indexToID.count {
+                    return indexToID[idx]
+                }
+                return nil
+            }()
+            let resolvedOffset: CGPoint?
+            if referenceTileID != nil {
+                resolvedOffset = tileOffset
             } else {
-                referenceTileID = nil
-                tileOffset = nil
+                resolvedOffset = nil
             }
             decoded[slot] = CanvasSavepoint(
                 camera: camera,
                 windowFrame: windowFrame,
                 referenceTileID: referenceTileID,
-                cameraOffsetFromTile: tileOffset
+                cameraOffsetFromTile: resolvedOffset
             )
         }
         return decoded
@@ -2345,6 +2510,7 @@ final class WorkspaceRootViewController: NSViewController {
             canvasSavepoints: persistedCanvasSavepoints(),
             arrangePadding: Double(arrangePadding),
             autoArrangeModeRawValue: autoArrangeMode?.rawValue,
+            sharpCorners: gridView.sharpCornersEnabled ? true : nil,
             workspaces: entries
         )
     }
@@ -2357,6 +2523,7 @@ final class WorkspaceRootViewController: NSViewController {
         let canvasSavepoints: [Int: CanvasSavepoint]
         let arrangePadding: CGFloat?
         let autoArrangeMode: ArrangeMode?
+        let sharpCorners: Bool
     }
 
     private func buildBootstrapState() -> BootstrapState {
@@ -2370,7 +2537,8 @@ final class WorkspaceRootViewController: NSViewController {
                 canvasCamera: nil,
                 canvasSavepoints: [:],
                 arrangePadding: nil,
-                autoArrangeMode: nil
+                autoArrangeMode: nil,
+                sharpCorners: false
             )
         }
         let profile = displayManager.mainDisplayProfile()
@@ -2424,9 +2592,14 @@ final class WorkspaceRootViewController: NSViewController {
             focusedWorkspaceID: focusedID,
             nextVirtualIndex: max(persisted.nextVirtualIndex, restored.count + 1),
             canvasCamera: restoredCanvasCamera(from: persisted),
-            canvasSavepoints: restoredCanvasSavepoints(from: persisted),
+            canvasSavepoints: restoredCanvasSavepoints(
+                from: persisted,
+                serialToID: Dictionary(uniqueKeysWithValues: restoredSerialByWorkspaceID.map { ($0.value, $0.key) }),
+                indexToID: restored.map(\.id)
+            ),
             arrangePadding: persisted.arrangePadding.map { CGFloat($0) },
-            autoArrangeMode: persisted.autoArrangeModeRawValue.flatMap { ArrangeMode(rawValue: $0) }
+            autoArrangeMode: persisted.autoArrangeModeRawValue.flatMap { ArrangeMode(rawValue: $0) },
+            sharpCorners: persisted.sharpCorners ?? false
         )
     }
 
@@ -2495,9 +2668,11 @@ final class WorkspaceRootViewController: NSViewController {
         canvasSavepoints = bootstrap.canvasSavepoints
         if let padding = bootstrap.arrangePadding { arrangePadding = padding }
         autoArrangeMode = bootstrap.autoArrangeMode
+        gridView.sharpCornersEnabled = bootstrap.sharpCorners
         gridView.layoutMode = .canvas
         applyInteractionMode()
         workspaceStore.normalizeTileSizesForCurrentDisplays()
+        hasUsedAdjacentJumpSinceBootstrap = false
         isRestoringState = false
 
         if hasScreenCaptureAccess {
@@ -2523,6 +2698,25 @@ final class WorkspaceRootViewController: NSViewController {
 
         setTileStatus(nil)
         signalInitialBootstrapCompleteIfNeeded()
+    }
+
+    private func showToast(_ message: String, duration: TimeInterval = 2.5) {
+        toastDismissWorkItem?.cancel()
+        toastLabel.stringValue = message
+        toastContainer.isHidden = false
+        toastContainer.alphaValue = 1.0
+
+        let work = DispatchWorkItem { [weak self] in
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = 0.3
+                self?.toastContainer.animator().alphaValue = 0.0
+            }, completionHandler: {
+                self?.toastContainer.isHidden = true
+                self?.toastContainer.alphaValue = 1.0
+            })
+        }
+        toastDismissWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: work)
     }
 
     private func setTileStatus(_ message: String?) {

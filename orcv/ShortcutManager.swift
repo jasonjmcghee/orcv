@@ -500,6 +500,10 @@ final class ShortcutManager {
         modifierOptions()
     }
 
+    func displayString(for action: ShortcutAction) -> String {
+        compiled[action]?.display ?? action.defaultShortcut
+    }
+
     func menuKeyEquivalent(for action: ShortcutAction) -> (key: String, modifiers: NSEvent.ModifierFlags)? {
         guard let binding = compiled[action], case .key(let chord) = binding else { return nil }
         guard let token = Self.keyCodeToToken[chord.keyCode] else { return nil }
