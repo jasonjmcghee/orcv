@@ -1,5 +1,6 @@
 # macOS
 .DS_Store
+!assets/dmg/.DS_Store
 
 # Local agent/tooling directories
 .claude/
@@ -25,3 +26,5 @@ xcuserdata/
 # Local environment files
 .env
 .env.*
+.venv*/
+__pycache__/

@@ -86,10 +86,23 @@ jobs:
 
       - name: Create DMG
         run: |
-          hdiutil create -volname "orcv" \
-            -srcfolder build/orcv.app \
-            -ov -format UDZO \
-            build/orcv-${{ inputs.version }}.dmg
+          test -f "$PWD/assets/dmg/.DS_Store"
+          chmod +x ./create_dmg.sh
+          ./create_dmg.sh \
+            "$PWD/build/orcv.app" \
+            "$PWD/build/orcv-${{ inputs.version }}.dmg" \
+            "orcv"
+
+      - name: Verify DMG root contents
+        run: |
+          set -euo pipefail
+          MNT="$(mktemp -d /tmp/orcv-dmg-verify.XXXXXX)"
+          hdiutil attach "$PWD/build/orcv-${{ inputs.version }}.dmg" -mountpoint "$MNT" -nobrowse -quiet
+          ls -la "$MNT"
+          test -d "$MNT/orcv.app"
+          test -e "$MNT/Applications"
+          hdiutil detach "$MNT" -quiet
+          rmdir "$MNT"
 
       - name: Create GitHub Release
         env:

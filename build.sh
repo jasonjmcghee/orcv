@@ -30,5 +30,13 @@ codesign --force --deep --sign - "$APP_DIR"
 
 codesign --verify --verbose "$APP_DIR"
 
+DMG_PATH="$BUILD_DIR/$APP_NAME.dmg"
+if ! "$ROOT_DIR/create_dmg.sh" "$APP_DIR" "$DMG_PATH" "$APP_NAME"; then
+  echo "warning: DMG creation failed; app build is still available at $APP_DIR" >&2
+fi
+
 echo "Built: $APP_DIR"
 echo "Run:   $APP_DIR/Contents/MacOS/$APP_NAME"
+if [ -f "$DMG_PATH" ]; then
+  echo "DMG:   $DMG_PATH"
+fi
