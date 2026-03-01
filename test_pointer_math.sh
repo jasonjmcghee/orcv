@@ -11,7 +11,7 @@ swiftc \
   -O \
   -framework Foundation \
   -framework CoreGraphics \
-  "$ROOT_DIR/PointerMath.swift" \
+  "$ROOT_DIR/orcv/PointerMath.swift" \
   "$ROOT_DIR/tests/PointerMathTests.swift" \
   -o "$BIN"
 

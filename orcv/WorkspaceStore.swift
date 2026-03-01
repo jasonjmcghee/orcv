@@ -102,66 +102,6 @@ final class WorkspaceStore {
         onDidChange?()
     }
 
-    func resizeWorkspace(workspaceID: UUID, tileSize: CGSize) {
-        guard let index = workspaces.firstIndex(where: { $0.id == workspaceID }) else { return }
-
-        let pixel = workspaces[index].displayPixelSize
-        let ratio = max(0.1, pixel.width / max(1.0, pixel.height))
-
-        let minHeight = max(140.0, 220.0 / ratio)
-        let maxHeight = min(900.0, 1200.0 / ratio)
-
-        var targetHeight = tileSize.height
-        if !targetHeight.isFinite || targetHeight <= 0 {
-            targetHeight = workspaces[index].tileSize.height
-        }
-        targetHeight = max(minHeight, min(maxHeight, targetHeight))
-
-        let locked = CGSize(width: targetHeight * ratio, height: targetHeight)
-        workspaces[index].tileSize = locked
-        onDidChange?()
-    }
-
-    func resizeAllWorkspaces(from workspaceID: UUID, tileSize: CGSize) {
-        guard let index = workspaces.firstIndex(where: { $0.id == workspaceID }) else { return }
-        guard !workspaces.isEmpty else { return }
-
-        let sourcePixel = workspaces[index].displayPixelSize
-        let sourceRatio = max(0.1, sourcePixel.width / max(1.0, sourcePixel.height))
-        let sourceCurrentHeight = workspaces[index].tileSize.height
-        let sourceTargetHeight = tileSize.width / sourceRatio
-        let scale = max(0.2, min(5.0, sourceTargetHeight / max(1.0, sourceCurrentHeight)))
-
-        for i in workspaces.indices {
-            let pixel = workspaces[i].displayPixelSize
-            let ratio = max(0.1, pixel.width / max(1.0, pixel.height))
-            let minHeight = max(140.0, 220.0 / ratio)
-            let maxHeight = min(900.0, 1200.0 / ratio)
-
-            let currentHeight = workspaces[i].tileSize.height
-            let targetHeight = max(minHeight, min(maxHeight, currentHeight * scale))
-            workspaces[i].tileSize = CGSize(width: targetHeight * ratio, height: targetHeight)
-        }
-
-        onDidChange?()
-    }
-
-    func setTileSizes(_ sizesByWorkspaceID: [UUID: CGSize]) {
-        guard !sizesByWorkspaceID.isEmpty else { return }
-        var changed = false
-        for i in workspaces.indices {
-            guard let size = sizesByWorkspaceID[workspaces[i].id] else { continue }
-            if abs(workspaces[i].tileSize.width - size.width) > 0.5
-                || abs(workspaces[i].tileSize.height - size.height) > 0.5 {
-                workspaces[i].tileSize = size
-                changed = true
-            }
-        }
-        if changed {
-            onDidChange?()
-        }
-    }
-
     func normalizeTileSizesForCurrentDisplays() {
         guard !workspaces.isEmpty else { return }
         var changed = false
@@ -305,7 +245,7 @@ final class WorkspaceStore {
         }
         let nextIndex = (currentIndex + 1) % workspaces.count
         focusedWorkspaceID = workspaces[nextIndex].id
-        if selectedWorkspaceIDs.isEmpty, let focusedWorkspaceID {
+        if let focusedWorkspaceID {
             selectedWorkspaceIDs = [focusedWorkspaceID]
         }
         onDidChange?()
@@ -324,7 +264,7 @@ final class WorkspaceStore {
         }
         let previousIndex = (currentIndex - 1 + workspaces.count) % workspaces.count
         focusedWorkspaceID = workspaces[previousIndex].id
-        if selectedWorkspaceIDs.isEmpty, let focusedWorkspaceID {
+        if let focusedWorkspaceID {
             selectedWorkspaceIDs = [focusedWorkspaceID]
         }
         onDidChange?()

@@ -39,23 +39,57 @@ jobs:
 
           echo "KEYCHAIN_FILE=$KEYCHAIN_FILE" >> "$GITHUB_ENV"
 
-      - name: Build app
-        run: ./build.sh
+      - name: Build signed app
+        run: |
+          set -euo pipefail
+
+          SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_FILE" \
+            | sed -n 's/.*"\(.*\)"/\1/p' \
+            | grep '^Developer ID Application:' \
+            | head -n 1)"
+
+          if [ -z "$SIGNING_IDENTITY" ]; then
+            echo "error: no Developer ID Application signing identity found in imported keychain" >&2
+            security find-identity -v -p codesigning "$KEYCHAIN_FILE" || true
+            exit 1
+          fi
+
+          echo "Using signing identity: $SIGNING_IDENTITY"
+
+          xcodebuild \
+            -project orcv.xcodeproj \
+            -scheme orcv \
+            -configuration Release \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGNING_REQUIRED=YES \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
+            CODE_SIGN_IDENTITY="$SIGNING_IDENTITY" \
+            OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN_FILE" \
+            build
+
+          ditto build/DerivedData/Build/Products/Release/orcv.app build/orcv.app
+
+          if ! codesign -dv --verbose=4 build/orcv.app 2>&1 | grep -q '^Authority='; then
+            echo "error: expected certificate-signed app, but no signing authority was found" >&2
+            exit 1
+          fi
 
       - name: Create DMG
         run: |
-          hdiutil create -volname "WorkspaceGrid" \
-            -srcfolder build/WorkspaceGrid.app \
+          hdiutil create -volname "orcv" \
+            -srcfolder build/orcv.app \
             -ov -format UDZO \
-            build/WorkspaceGrid-${{ inputs.version }}.dmg
+            build/orcv-${{ inputs.version }}.dmg
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "v${{ inputs.version }}" \
-            build/WorkspaceGrid-${{ inputs.version }}.dmg \
-            --title "WorkspaceGrid v${{ inputs.version }}" \
+            build/orcv-${{ inputs.version }}.dmg \
+            --title "orcv v${{ inputs.version }}" \
             --generate-notes
 
       - name: Cleanup keychain

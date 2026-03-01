@@ -4,63 +4,29 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="$ROOT_DIR/build"
 APP_NAME="orcv"
+DERIVED_DIR="$BUILD_DIR/DerivedData"
+PRODUCT_APP="$DERIVED_DIR/Build/Products/Release/$APP_NAME.app"
 APP_DIR="$BUILD_DIR/$APP_NAME.app"
-BIN_DIR="$APP_DIR/Contents/MacOS"
-RES_DIR="$APP_DIR/Contents/Resources"
 
-if [[ -z "${SIGNING_IDENTITY:-}" ]]; then
-  SIGNING_IDENTITY="$(
-    security find-identity -v -p codesigning 2>/dev/null \
-      | sed -n 's/.*"\(.*\)"/\1/p' \
-      | head -n 1
-  )"
-fi
-
-if [[ -z "${SIGNING_IDENTITY:-}" ]]; then
-  SIGNING_IDENTITY="-"
-  echo "warning: no code-signing identity found, using ad-hoc signing"
-else
-  echo "Signing with identity: $SIGNING_IDENTITY"
+if ! command -v xcodebuild >/dev/null 2>&1; then
+  echo "error: xcodebuild not found. Install Xcode or run on a macOS runner with Xcode preinstalled." >&2
+  exit 1
 fi
 
 rm -rf "$BUILD_DIR"
-mkdir -p "$BIN_DIR" "$RES_DIR"
+mkdir -p "$BUILD_DIR"
 
-swiftc \
-  -O \
-  -import-objc-header "$ROOT_DIR/orcv-Bridging-Header.h" \
-  -framework Foundation \
-  -framework AppKit \
-  -framework CoreGraphics \
-  -framework CoreMedia \
-  -framework CoreVideo \
-  -framework IOSurface \
-  -framework ScreenCaptureKit \
-  -o "$BIN_DIR/$APP_NAME" \
-  "$ROOT_DIR/main.swift" \
-  "$ROOT_DIR/AppDelegate.swift" \
-  "$ROOT_DIR/ScreenCaptureAuthorization.swift" \
-  "$ROOT_DIR/Models.swift" \
-  "$ROOT_DIR/ReferenceModels.swift" \
-  "$ROOT_DIR/ShortcutManager.swift" \
-  "$ROOT_DIR/ShortcutSettingsWindowController.swift" \
-  "$ROOT_DIR/WorkspaceStateStore.swift" \
-  "$ROOT_DIR/WorkspaceStore.swift" \
-  "$ROOT_DIR/VirtualDisplayManager.swift" \
-  "$ROOT_DIR/DisplayStreamManager.swift" \
-  "$ROOT_DIR/PointerMath.swift" \
-  "$ROOT_DIR/PointerRouter.swift" \
-  "$ROOT_DIR/InputMacroEngine.swift" \
-  "$ROOT_DIR/WorkspacePreviewWindowController.swift" \
-  "$ROOT_DIR/OrcvGridView.swift" \
-  "$ROOT_DIR/WorkspaceRootViewController.swift"
+xcodebuild \
+  -project "$ROOT_DIR/orcv.xcodeproj" \
+  -scheme "$APP_NAME" \
+  -configuration Release \
+  -derivedDataPath "$DERIVED_DIR" \
+  CODE_SIGNING_ALLOWED=NO \
+  CODE_SIGNING_REQUIRED=NO \
+  build
 
-cp "$ROOT_DIR/Info.plist" "$APP_DIR/Contents/Info.plist"
-cp "$ROOT_DIR/orcv.entitlements" "$RES_DIR/orcv.entitlements"
-
-codesign --force --deep --sign "$SIGNING_IDENTITY" \
-  --entitlements "$ROOT_DIR/orcv.entitlements" \
-  "$APP_DIR"
+ditto "$PRODUCT_APP" "$APP_DIR"
+codesign --force --deep --sign - "$APP_DIR"
 
 codesign --verify --verbose "$APP_DIR"
 

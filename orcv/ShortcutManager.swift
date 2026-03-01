@@ -5,20 +5,22 @@ enum ShortcutAction: String, CaseIterable {
     case toggleTeleport = "toggle_teleport"
     case newDisplay = "new_display"
     case removeDisplay = "remove_display"
-    case focusNext = "focus_next"
-    case focusPrevious = "focus_previous"
     case fullscreenSelected = "fullscreen_selected"
     case jumpNextDisplay = "jump_next_display"
+    case jumpPreviousDisplay = "jump_previous_display"
+    case windowFollowHold = "window_follow_hold"
+    case deselectTile = "deselect_tile"
 
     var title: String {
         switch self {
         case .toggleTeleport: return "Toggle Teleport"
         case .newDisplay: return "New Display"
         case .removeDisplay: return "Close Display"
-        case .focusNext: return "Focus Next"
-        case .focusPrevious: return "Focus Previous"
         case .fullscreenSelected: return "Fullscreen Selected"
         case .jumpNextDisplay: return "Jump Next Display"
+        case .jumpPreviousDisplay: return "Jump Previous Display"
+        case .windowFollowHold: return "Window Follow (Hold)"
+        case .deselectTile: return "Deselect Tile"
         }
     }
 
@@ -27,10 +29,11 @@ enum ShortcutAction: String, CaseIterable {
         case .toggleTeleport: return "double_cmd"
         case .newDisplay: return "cmd+n"
         case .removeDisplay: return "cmd+w"
-        case .focusNext: return "ctrl+alt+right"
-        case .focusPrevious: return "ctrl+alt+left"
-        case .fullscreenSelected: return "cmd+shift+f"
-        case .jumpNextDisplay: return "alt+tab"
+        case .fullscreenSelected: return "double_shift"
+        case .jumpNextDisplay: return "tab"
+        case .jumpPreviousDisplay: return "shift+tab"
+        case .windowFollowHold: return "space"
+        case .deselectTile: return "backspace"
         }
     }
 }
@@ -119,32 +122,78 @@ final class ShortcutManager {
     private let store: ShortcutStore
     private var bindings: [ShortcutAction: String]
     private var compiled: [ShortcutAction: ShortcutBinding]
+    private var scalingResizeModifier: ShortcutModifier?
+    private var zoomModifier: ShortcutModifier?
+    private var jumpToSlotModifier: ShortcutModifier?
+    private var savepointModifier: ShortcutModifier?
     private var lastTapByModifier: [ShortcutModifier: TimeInterval] = [:]
     private var lastTapByKey: [KeyTapIdentity: TimeInterval] = [:]
     private let doubleTapInterval: TimeInterval = 0.45
+    private static let defaultScalingResizeModifier: ShortcutModifier? = .shift
+    private static let defaultZoomModifier: ShortcutModifier? = .command
+    private static let defaultJumpToSlotModifier: ShortcutModifier? = .option
+    private static let defaultSavepointModifier: ShortcutModifier? = .command
+    private static let legacyBindingMigrations: [ShortcutAction: String] = [
+        .fullscreenSelected: "cmd+shift+f",
+    ]
 
     var onDidChange: (() -> Void)?
 
     init(bundleIdentifier: String) {
         store = ShortcutStore(bundleIdentifier: bundleIdentifier)
-        let loadedBindings = store.load()
+        let loaded = store.load()
+        let loadedBindings = loaded.bindings
+        scalingResizeModifier = Self.parseModifierToken(loaded.scalingResizeModifierToken)
+            ?? Self.defaultScalingResizeModifier
+        zoomModifier = Self.parseModifierToken(loaded.zoomModifierToken)
+            ?? Self.defaultZoomModifier
+        jumpToSlotModifier = Self.parseModifierToken(loaded.jumpToSlotModifierToken)
+            ?? Self.defaultJumpToSlotModifier
+        savepointModifier = Self.parseModifierToken(loaded.savepointModifierToken)
+            ?? Self.defaultSavepointModifier
         if Self.shouldResetToDefaults(loadedBindings) {
             let defaults = Self.defaultBindings()
             bindings = defaults
             compiled = Self.compile(bindings: defaults)
-            store.save(bindings: defaults)
+            store.save(
+                bindings: defaults,
+                scalingResizeModifierToken: Self.modifierToken(from: scalingResizeModifier),
+                zoomModifierToken: Self.modifierToken(from: zoomModifier),
+                jumpToSlotModifierToken: Self.modifierToken(from: jumpToSlotModifier),
+                savepointModifierToken: Self.modifierToken(from: savepointModifier)
+            )
             return
         }
 
         var resolved: [ShortcutAction: String] = [:]
+        var didMigrateLegacyBinding = false
         for action in ShortcutAction.allCases {
-            let value = loadedBindings[action] ?? action.defaultShortcut
+            let loadedValue = loadedBindings[action] ?? action.defaultShortcut
+            let normalizedLoaded = loadedValue
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            let value: String
+            if let legacy = Self.legacyBindingMigrations[action], normalizedLoaded == legacy {
+                value = action.defaultShortcut
+                didMigrateLegacyBinding = true
+            } else {
+                value = loadedValue
+            }
             if let binding = Self.parse(bindingString: value) {
                 resolved[action] = binding.canonical
             }
         }
         bindings = resolved
         compiled = Self.compile(bindings: resolved)
+        if didMigrateLegacyBinding {
+            store.save(
+                bindings: bindings,
+                scalingResizeModifierToken: Self.modifierToken(from: scalingResizeModifier),
+                zoomModifierToken: Self.modifierToken(from: zoomModifier),
+                jumpToSlotModifierToken: Self.modifierToken(from: jumpToSlotModifier),
+                savepointModifierToken: Self.modifierToken(from: savepointModifier)
+            )
+        }
     }
 
     private static func shouldResetToDefaults(_ loaded: [ShortcutAction: String]) -> Bool {
@@ -266,8 +315,170 @@ final class ShortcutManager {
         }
         bindings = next
         compiled = Self.compile(bindings: next)
-        store.save(bindings: bindings)
+        store.save(
+            bindings: bindings,
+            scalingResizeModifierToken: Self.modifierToken(from: scalingResizeModifier),
+            zoomModifierToken: Self.modifierToken(from: zoomModifier),
+            jumpToSlotModifierToken: Self.modifierToken(from: jumpToSlotModifier),
+            savepointModifierToken: Self.modifierToken(from: savepointModifier)
+        )
         onDidChange?()
+    }
+
+    func scalingResizeModifierValue() -> ShortcutModifier? {
+        scalingResizeModifier
+    }
+
+    func updateScalingResizeModifier(_ modifier: ShortcutModifier?) {
+        scalingResizeModifier = modifier
+        store.save(
+            bindings: bindings,
+            scalingResizeModifierToken: Self.modifierToken(from: scalingResizeModifier),
+            zoomModifierToken: Self.modifierToken(from: zoomModifier),
+            jumpToSlotModifierToken: Self.modifierToken(from: jumpToSlotModifier),
+            savepointModifierToken: Self.modifierToken(from: savepointModifier)
+        )
+        onDidChange?()
+    }
+
+    func isScalingResizeModifierActive(modifierFlags: NSEvent.ModifierFlags? = nil) -> Bool {
+        guard let modifier = scalingResizeModifier else { return false }
+        if let modifierFlags {
+            let normalized = Self.normalizeModifiers(modifierFlags)
+            if normalized.contains(modifier.flag) {
+                return true
+            }
+        }
+        return Self.isModifierKeyDown(modifier)
+    }
+
+    func zoomModifierValue() -> ShortcutModifier? {
+        zoomModifier
+    }
+
+    func updateZoomModifier(_ modifier: ShortcutModifier?) {
+        zoomModifier = modifier
+        store.save(
+            bindings: bindings,
+            scalingResizeModifierToken: Self.modifierToken(from: scalingResizeModifier),
+            zoomModifierToken: Self.modifierToken(from: zoomModifier),
+            jumpToSlotModifierToken: Self.modifierToken(from: jumpToSlotModifier),
+            savepointModifierToken: Self.modifierToken(from: savepointModifier)
+        )
+        onDidChange?()
+    }
+
+    func isZoomModifierActive(modifierFlags: NSEvent.ModifierFlags? = nil) -> Bool {
+        guard let modifier = zoomModifier else { return false }
+        if let modifierFlags {
+            let normalized = Self.normalizeModifiers(modifierFlags)
+            if normalized.contains(modifier.flag) {
+                return true
+            }
+        }
+        return Self.isModifierKeyDown(modifier)
+    }
+
+    func jumpToSlotModifierValue() -> ShortcutModifier? {
+        jumpToSlotModifier
+    }
+
+    func updateJumpToSlotModifier(_ modifier: ShortcutModifier?) {
+        jumpToSlotModifier = modifier
+        store.save(
+            bindings: bindings,
+            scalingResizeModifierToken: Self.modifierToken(from: scalingResizeModifier),
+            zoomModifierToken: Self.modifierToken(from: zoomModifier),
+            jumpToSlotModifierToken: Self.modifierToken(from: jumpToSlotModifier),
+            savepointModifierToken: Self.modifierToken(from: savepointModifier)
+        )
+        onDidChange?()
+    }
+
+    func matchesJumpToSlotModifier(_ modifierFlags: NSEvent.ModifierFlags) -> Bool {
+        guard let jumpToSlotModifier else { return false }
+        return Self.modifiersExactlyMatch(modifierFlags, modifier: jumpToSlotModifier)
+    }
+
+    func savepointModifierValue() -> ShortcutModifier? {
+        savepointModifier
+    }
+
+    func updateSavepointModifier(_ modifier: ShortcutModifier?) {
+        savepointModifier = modifier
+        store.save(
+            bindings: bindings,
+            scalingResizeModifierToken: Self.modifierToken(from: scalingResizeModifier),
+            zoomModifierToken: Self.modifierToken(from: zoomModifier),
+            jumpToSlotModifierToken: Self.modifierToken(from: jumpToSlotModifier),
+            savepointModifierToken: Self.modifierToken(from: savepointModifier)
+        )
+        onDidChange?()
+    }
+
+    func matchesSavepointModifier(_ modifierFlags: NSEvent.ModifierFlags) -> Bool {
+        guard let savepointModifier else { return false }
+        return Self.modifiersExactlyMatch(modifierFlags, modifier: savepointModifier)
+    }
+
+    func isWindowFollowShortcutActive(modifierFlags: NSEvent.ModifierFlags? = nil) -> Bool {
+        guard let chord = keyChord(for: .windowFollowHold) else { return false }
+        guard CGEventSource.keyState(.combinedSessionState, key: chord.keyCode) else { return false }
+        let activeModifiers = modifierFlags.map(Self.normalizeModifiers) ?? Self.currentGlobalModifierFlags()
+        return activeModifiers == chord.modifiers
+    }
+
+    static func parseScalingResizeModifierToken(_ token: String?) -> ShortcutModifier? {
+        parseModifierToken(token)
+    }
+
+    static func scalingResizeModifierToken(from modifier: ShortcutModifier?) -> String {
+        modifierToken(from: modifier)
+    }
+
+    static func parseModifierToken(_ token: String?) -> ShortcutModifier? {
+        guard let token else { return nil }
+        let normalized = token
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !normalized.isEmpty else { return nil }
+        if normalized == "none" { return nil }
+        return modifierTokenMap[normalized]
+    }
+
+    static func modifierToken(from modifier: ShortcutModifier?) -> String {
+        modifier?.rawValue ?? "none"
+    }
+
+    private static func isModifierKeyDown(_ modifier: ShortcutModifier) -> Bool {
+        switch modifier {
+        case .command:
+            return CGEventSource.keyState(.combinedSessionState, key: 55)
+                || CGEventSource.keyState(.combinedSessionState, key: 54)
+        case .shift:
+            return CGEventSource.keyState(.combinedSessionState, key: 56)
+                || CGEventSource.keyState(.combinedSessionState, key: 60)
+        case .option:
+            return CGEventSource.keyState(.combinedSessionState, key: 58)
+                || CGEventSource.keyState(.combinedSessionState, key: 61)
+        case .control:
+            return CGEventSource.keyState(.combinedSessionState, key: 59)
+                || CGEventSource.keyState(.combinedSessionState, key: 62)
+        }
+    }
+
+    static func modifierOptions() -> [(token: String, label: String)] {
+        [
+            (token: ShortcutModifier.shift.rawValue, label: ShortcutModifier.shift.displayName),
+            (token: ShortcutModifier.command.rawValue, label: ShortcutModifier.command.displayName),
+            (token: ShortcutModifier.option.rawValue, label: ShortcutModifier.option.displayName),
+            (token: ShortcutModifier.control.rawValue, label: ShortcutModifier.control.displayName),
+            (token: "none", label: "None"),
+        ]
+    }
+
+    static func scalingResizeModifierOptions() -> [(token: String, label: String)] {
+        modifierOptions()
     }
 
     func shortcutsFilePath() -> String {
@@ -443,6 +654,28 @@ final class ShortcutManager {
         modifiers.intersection([.control, .option, .command, .shift])
     }
 
+    private static func modifiersExactlyMatch(_ flags: NSEvent.ModifierFlags, modifier: ShortcutModifier) -> Bool {
+        let normalized = normalizeModifiers(flags)
+        return normalized == modifier.flag
+    }
+
+    private static func currentGlobalModifierFlags() -> NSEvent.ModifierFlags {
+        var flags = NSEvent.ModifierFlags()
+        if isModifierKeyDown(.control) { flags.insert(.control) }
+        if isModifierKeyDown(.option) { flags.insert(.option) }
+        if isModifierKeyDown(.command) { flags.insert(.command) }
+        if isModifierKeyDown(.shift) { flags.insert(.shift) }
+        return flags
+    }
+
+    private func keyChord(for action: ShortcutAction) -> ShortcutKeyChord? {
+        guard let binding = compiled[action] else { return nil }
+        if case .key(let chord) = binding {
+            return chord
+        }
+        return nil
+    }
+
     private static func canonicalString(modifiers: NSEvent.ModifierFlags, key: String) -> String {
         var tokens: [String] = []
         if modifiers.contains(.control) { tokens.append("ctrl") }
@@ -543,6 +776,14 @@ final class ShortcutManager {
 }
 
 private final class ShortcutStore {
+    struct LoadedConfig {
+        var bindings: [ShortcutAction: String]
+        var scalingResizeModifierToken: String?
+        var zoomModifierToken: String?
+        var jumpToSlotModifierToken: String?
+        var savepointModifierToken: String?
+    }
+
     private let fileURL: URL
     private let queue = DispatchQueue(label: "today.jason.orcv.shortcut-store")
 
@@ -558,13 +799,23 @@ private final class ShortcutStore {
         fileURL.path
     }
 
-    func load() -> [ShortcutAction: String] {
+    func load() -> LoadedConfig {
         guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else {
-            return [:]
+            return LoadedConfig(
+                bindings: [:],
+                scalingResizeModifierToken: nil,
+                zoomModifierToken: nil,
+                jumpToSlotModifierToken: nil,
+                savepointModifierToken: nil
+            )
         }
 
         var currentSection = ""
         var map: [ShortcutAction: String] = [:]
+        var scalingResizeModifierToken: String?
+        var zoomModifierToken: String?
+        var jumpToSlotModifierToken: String?
+        var savepointModifierToken: String?
 
         for rawLine in content.components(separatedBy: .newlines) {
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -576,8 +827,7 @@ private final class ShortcutStore {
                 continue
             }
 
-            guard currentSection == "[shortcuts]",
-                  let eq = line.firstIndex(of: "=") else {
+            guard let eq = line.firstIndex(of: "=") else {
                 continue
             }
 
@@ -587,14 +837,44 @@ private final class ShortcutStore {
                 value.removeFirst()
                 value.removeLast()
             }
-            guard let action = ShortcutAction(rawValue: key) else { continue }
-            map[action] = value
+            if currentSection == "[shortcuts]" {
+                guard let action = ShortcutAction(rawValue: key) else { continue }
+                map[action] = value
+                continue
+            }
+            if currentSection == "[modifiers]" && key == "scaling_resize_modifier" {
+                scalingResizeModifierToken = value
+                continue
+            }
+            if currentSection == "[modifiers]" && key == "zoom_modifier" {
+                zoomModifierToken = value
+                continue
+            }
+            if currentSection == "[modifiers]" && key == "jump_slot_modifier" {
+                jumpToSlotModifierToken = value
+                continue
+            }
+            if currentSection == "[modifiers]" && key == "savepoint_modifier" {
+                savepointModifierToken = value
+            }
         }
 
-        return map
+        return LoadedConfig(
+            bindings: map,
+            scalingResizeModifierToken: scalingResizeModifierToken,
+            zoomModifierToken: zoomModifierToken,
+            jumpToSlotModifierToken: jumpToSlotModifierToken,
+            savepointModifierToken: savepointModifierToken
+        )
     }
 
-    func save(bindings: [ShortcutAction: String]) {
+    func save(
+        bindings: [ShortcutAction: String],
+        scalingResizeModifierToken: String?,
+        zoomModifierToken: String?,
+        jumpToSlotModifierToken: String?,
+        savepointModifierToken: String?
+    ) {
         queue.async {
             var lines: [String] = []
             lines.append("# orcv shortcuts")
@@ -603,6 +883,16 @@ private final class ShortcutStore {
                 let value = bindings[action] ?? action.defaultShortcut
                 lines.append("\(action.rawValue) = \"\(value)\"")
             }
+            lines.append("")
+            lines.append("[modifiers]")
+            let modifierToken = scalingResizeModifierToken ?? "none"
+            lines.append("scaling_resize_modifier = \"\(modifierToken)\"")
+            let zoomToken = zoomModifierToken ?? "none"
+            lines.append("zoom_modifier = \"\(zoomToken)\"")
+            let jumpToken = jumpToSlotModifierToken ?? "none"
+            lines.append("jump_slot_modifier = \"\(jumpToken)\"")
+            let savepointToken = savepointModifierToken ?? "none"
+            lines.append("savepoint_modifier = \"\(savepointToken)\"")
             lines.append("")
             let content = lines.joined(separator: "\n")
 

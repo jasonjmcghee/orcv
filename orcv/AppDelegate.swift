@@ -9,6 +9,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var rootViewController: WorkspaceRootViewController?
     private var shortcutManager: ShortcutManager?
     private var shortcutsWindowController: ShortcutSettingsWindowController?
+    private var alwaysOnTopMenuItem: NSMenuItem?
+    private var showDisplayIDsMenuItem: NSMenuItem?
+    private var centerTileOnJumpMenuItem: NSMenuItem?
+    private var swapResizeBehaviorMenuItem: NSMenuItem?
     private var terminateInProgress = false
     private var didShowMainWindow = false
 
@@ -142,15 +146,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         closeDisplayItem.keyEquivalentModifierMask = [.command]
         closeDisplayItem.target = self
         fileMenu.addItem(closeDisplayItem)
-        fileMenu.addItem(.separator())
-
-        let fullscreenSelectedItem = NSMenuItem(
-            title: "Fullscreen Selected",
-            action: #selector(showFullscreenSelected(_:)),
-            keyEquivalent: ""
-        )
-        fullscreenSelectedItem.target = self
-        fileMenu.addItem(fullscreenSelectedItem)
         fileMenuItem.submenu = fileMenu
 
         let editMenuItem = NSMenuItem()
@@ -174,10 +169,83 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         editMenu.addItem(redoItem)
         editMenuItem.submenu = editMenu
 
+        let navigateMenuItem = NSMenuItem()
+        mainMenu.addItem(navigateMenuItem)
+
+        let navigateMenu = NSMenu(title: "Navigate")
+        let jumpNextDisplayItem = NSMenuItem(
+            title: "Jump Next Display",
+            action: #selector(navigateJumpNextDisplay(_:)),
+            keyEquivalent: ""
+        )
+        jumpNextDisplayItem.target = self
+        navigateMenu.addItem(jumpNextDisplayItem)
+
+        let jumpPreviousDisplayItem = NSMenuItem(
+            title: "Jump Previous Display",
+            action: #selector(navigateJumpPreviousDisplay(_:)),
+            keyEquivalent: ""
+        )
+        jumpPreviousDisplayItem.target = self
+        navigateMenu.addItem(jumpPreviousDisplayItem)
+        navigateMenu.addItem(.separator())
+
+        let deselectTileItem = NSMenuItem(
+            title: "Deselect Tile",
+            action: #selector(navigateDeselectTile(_:)),
+            keyEquivalent: ""
+        )
+        deselectTileItem.target = self
+        navigateMenu.addItem(deselectTileItem)
+        navigateMenuItem.submenu = navigateMenu
+
         let viewMenuItem = NSMenuItem()
         mainMenu.addItem(viewMenuItem)
 
         let viewMenu = NSMenu(title: "View")
+        let alwaysOnTopItem = NSMenuItem(
+            title: "Always on Top",
+            action: #selector(toggleAlwaysOnTop(_:)),
+            keyEquivalent: "t"
+        )
+        alwaysOnTopItem.keyEquivalentModifierMask = [.command, .option]
+        alwaysOnTopItem.target = self
+        alwaysOnTopItem.state = .off
+        alwaysOnTopMenuItem = alwaysOnTopItem
+        viewMenu.addItem(alwaysOnTopItem)
+
+        let showDisplayIDsItem = NSMenuItem(
+            title: "Show Display IDs",
+            action: #selector(toggleShowDisplayIDs(_:)),
+            keyEquivalent: ""
+        )
+        showDisplayIDsItem.target = self
+        showDisplayIDsItem.state = .off
+        showDisplayIDsMenuItem = showDisplayIDsItem
+        viewMenu.addItem(showDisplayIDsItem)
+
+        let centerTileOnJumpItem = NSMenuItem(
+            title: "Center Tile on Jump",
+            action: #selector(toggleCenterTileOnJump(_:)),
+            keyEquivalent: ""
+        )
+        centerTileOnJumpItem.target = self
+        centerTileOnJumpItem.state = .off
+        centerTileOnJumpMenuItem = centerTileOnJumpItem
+        viewMenu.addItem(centerTileOnJumpItem)
+
+        let swapResizeBehaviorItem = NSMenuItem(
+            title: "Swap Resize Behavior",
+            action: #selector(toggleSwapResizeBehavior(_:)),
+            keyEquivalent: ""
+        )
+        swapResizeBehaviorItem.target = self
+        swapResizeBehaviorItem.state = .off
+        swapResizeBehaviorMenuItem = swapResizeBehaviorItem
+        viewMenu.addItem(swapResizeBehaviorItem)
+
+        viewMenu.addItem(.separator())
+
         let resetZoomItem = NSMenuItem(
             title: "Reset Zoom",
             action: #selector(resetCanvasZoom(_:)),
@@ -194,16 +262,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         jumpToOriginItem.keyEquivalentModifierMask = [.command, .option]
         jumpToOriginItem.target = self
         viewMenu.addItem(jumpToOriginItem)
-
-        viewMenu.addItem(.separator())
-        let fullscreenItem = NSMenuItem(
-            title: "Fullscreen Selected",
-            action: #selector(showFullscreenSelected(_:)),
-            keyEquivalent: "f"
-        )
-        fullscreenItem.keyEquivalentModifierMask = [.command, .shift]
-        fullscreenItem.target = self
-        viewMenu.addItem(fullscreenItem)
         viewMenuItem.submenu = viewMenu
 
         NSApp.mainMenu = mainMenu
@@ -246,9 +304,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc
-    private func showFullscreenSelected(_ sender: Any?) {
+    private func navigateJumpNextDisplay(_ sender: Any?) {
         _ = sender
-        rootViewController?.menuFullscreenSelected()
+        rootViewController?.menuJumpNextDisplay()
+    }
+
+    @objc
+    private func navigateJumpPreviousDisplay(_ sender: Any?) {
+        _ = sender
+        rootViewController?.menuJumpPreviousDisplay()
+    }
+
+    @objc
+    private func navigateDeselectTile(_ sender: Any?) {
+        _ = sender
+        rootViewController?.menuDeselectTile()
     }
 
     @objc
@@ -263,6 +333,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         rootViewController?.menuJumpToCanvasOrigin()
     }
 
+    @objc
+    private func toggleAlwaysOnTop(_ sender: Any?) {
+        _ = sender
+        rootViewController?.menuToggleAlwaysOnTop()
+        alwaysOnTopMenuItem?.state = rootViewController?.menuAlwaysOnTopEnabled() == true ? .on : .off
+    }
+
+    @objc
+    private func toggleShowDisplayIDs(_ sender: Any?) {
+        _ = sender
+        rootViewController?.menuToggleShowDisplayIDs()
+        showDisplayIDsMenuItem?.state = rootViewController?.menuShowDisplayIDsEnabled() == true ? .on : .off
+    }
+
+    @objc
+    private func toggleCenterTileOnJump(_ sender: Any?) {
+        _ = sender
+        rootViewController?.menuToggleCenterTileOnJump()
+        centerTileOnJumpMenuItem?.state = rootViewController?.menuCenterTileOnJumpEnabled() == true ? .on : .off
+    }
+
+    @objc
+    private func toggleSwapResizeBehavior(_ sender: Any?) {
+        _ = sender
+        rootViewController?.menuToggleSwapResizeBehavior()
+        swapResizeBehaviorMenuItem?.state = rootViewController?.menuSwapResizeBehaviorEnabled() == true ? .on : .off
+    }
+
     func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? {
         _ = window
         return rootViewController?.undoManager
@@ -273,14 +371,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         applyChromelessWindowStyle(window)
     }
 
+    func windowWillStartLiveResize(_ notification: Notification) {
+        guard let eventWindow = notification.object as? NSWindow else { return }
+        guard eventWindow == window else { return }
+        rootViewController?.windowWillStartLiveResize(eventWindow)
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        guard let eventWindow = notification.object as? NSWindow else { return }
+        guard eventWindow == window else { return }
+        rootViewController?.windowDidEndLiveResize(eventWindow)
+    }
+
     private func showMainWindowWhenReady() {
         guard !didShowMainWindow, let window else { return }
         didShowMainWindow = true
         window.makeKeyAndOrderFront(nil)
         applyChromelessWindowStyle(window)
+        alwaysOnTopMenuItem?.state = rootViewController?.menuAlwaysOnTopEnabled() == true ? .on : .off
+        showDisplayIDsMenuItem?.state = rootViewController?.menuShowDisplayIDsEnabled() == true ? .on : .off
+        centerTileOnJumpMenuItem?.state = rootViewController?.menuCenterTileOnJumpEnabled() == true ? .on : .off
+        swapResizeBehaviorMenuItem?.state = rootViewController?.menuSwapResizeBehaviorEnabled() == true ? .on : .off
         DispatchQueue.main.async { [weak self] in
             guard let window = self?.window else { return }
             self?.applyChromelessWindowStyle(window)
+            self?.alwaysOnTopMenuItem?.state = self?.rootViewController?.menuAlwaysOnTopEnabled() == true ? .on : .off
+            self?.showDisplayIDsMenuItem?.state = self?.rootViewController?.menuShowDisplayIDsEnabled() == true ? .on : .off
+            self?.centerTileOnJumpMenuItem?.state = self?.rootViewController?.menuCenterTileOnJumpEnabled() == true ? .on : .off
+            self?.swapResizeBehaviorMenuItem?.state = self?.rootViewController?.menuSwapResizeBehaviorEnabled() == true ? .on : .off
         }
         NSApp.activate(ignoringOtherApps: true)
     }

@@ -10,6 +10,7 @@ final class WorkspacePreviewWindowController: NSWindowController, NSWindowDelega
     private var previousPresentationOptions: NSApplication.PresentationOptions?
     private var previousWindowLevel: NSWindow.Level?
     private var previousCollectionBehavior: NSWindow.CollectionBehavior?
+    var onDidClosePreview: (() -> Void)?
 
     init(referenceSurfaceProvider: @escaping (SurfaceReference) -> IOSurface?) {
         previewView = DisplaySurfacePreviewView(referenceSurfaceProvider: referenceSurfaceProvider)
@@ -88,8 +89,8 @@ final class WorkspacePreviewWindowController: NSWindowController, NSWindowDelega
         window.level = .floating
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
-        // Show above other windows without stealing key focus from the current app.
-        window.orderFrontRegardless()
+        // Make immersive preview key so click-away reliably triggers resign and auto-close.
+        window.makeKeyAndOrderFront(nil)
         refresh()
     }
 
@@ -111,6 +112,10 @@ final class WorkspacePreviewWindowController: NSWindowController, NSWindowDelega
     }
 
     func closePreview() {
+        let wasPresenting = activeReference != nil
+        let hadSavedWindowState = previousPresentationOptions != nil || previousWindowLevel != nil || previousCollectionBehavior != nil
+        guard wasPresenting || hadSavedWindowState else { return }
+
         guard let window else {
             activeReference = nil
             previewView.setReference(nil)
@@ -120,6 +125,9 @@ final class WorkspacePreviewWindowController: NSWindowController, NSWindowDelega
             }
             previousWindowLevel = nil
             previousCollectionBehavior = nil
+            if wasPresenting {
+                onDidClosePreview?()
+            }
             return
         }
 
@@ -139,9 +147,22 @@ final class WorkspacePreviewWindowController: NSWindowController, NSWindowDelega
             NSApp.presentationOptions = previousPresentationOptions
             self.previousPresentationOptions = nil
         }
+        if wasPresenting {
+            onDidClosePreview?()
+        }
     }
 
     func windowWillClose(_ notification: Notification) {
+        _ = notification
+        closePreview()
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        _ = notification
+        closePreview()
+    }
+
+    func windowDidResignMain(_ notification: Notification) {
         _ = notification
         closePreview()
     }

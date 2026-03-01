@@ -34,6 +34,13 @@ final class OrcvGridView: NSView {
         }
     }
 
+    var emptyStateCreateShortcutLabel: String = "Cmd+N" {
+        didSet {
+            guard oldValue != emptyStateCreateShortcutLabel else { return }
+            needsDisplay = true
+        }
+    }
+
     var layoutMode: WorkspaceLayoutMode = .canvas {
         didSet {
             guard oldValue != layoutMode else { return }
@@ -71,10 +78,7 @@ final class OrcvGridView: NSView {
     }
 
     var onFocusRequest: ((UUID, CGPoint, CGRect, NSEvent.ModifierFlags) -> Void)?
-    var onResizeBegin: ((UUID) -> Void)?
     var onBackgroundClick: (() -> Void)?
-    var onResizeRequest: ((UUID, CGSize) -> Void)?
-    var onResizeCommit: ((UUID) -> Void)?
     var onReorderCommit: (([UUID]) -> Void)?
     var onCanvasMoveCommit: ((UUID, CGPoint) -> Void)?
     var onBackgroundWindowDragRequest: ((NSEvent) -> Void)?
@@ -90,17 +94,13 @@ final class OrcvGridView: NSView {
         let overlay: CALayer
         let title: CATextLayer
         let subtitle: CATextLayer
-        let handle: CAShapeLayer
-        let border: CALayer
     }
 
     private var tileFrames: [UUID: CGRect] = [:]
     private var tileWorldFrames: [UUID: CGRect] = [:]
     private var tileLayers: [UUID: TileLayers] = [:]
 
-    private var resizingWorkspaceID: UUID?
-    private var resizeStartPoint: CGPoint = .zero
-    private var resizeStartSize: CGSize = .zero
+    private var dragStartPoint: CGPoint = .zero
     private var dragWorkspaceID: UUID?
     private var dragPointerOffset: CGPoint = .zero
     private var dragFrame: CGRect?
@@ -143,17 +143,7 @@ final class OrcvGridView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        guard workspaces.isEmpty else { return }
-
-        let style = NSMutableParagraphStyle()
-        style.alignment = .center
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 18, weight: .medium),
-            .foregroundColor: NSColor.secondaryLabelColor,
-            .paragraphStyle: style,
-        ]
-        let text = "No displays yet."
-        text.draw(in: bounds.insetBy(dx: 20, dy: 20), withAttributes: attrs)
+        _ = dirtyRect
     }
 
     func requiredContentHeight(forWidth width: CGFloat) -> CGFloat {
@@ -193,7 +183,7 @@ final class OrcvGridView: NSView {
             onFocusRequest?(workspace.id, pointInTile, frame, modifiers)
 
             dragWorkspaceID = workspace.id
-            resizeStartPoint = point
+            dragStartPoint = point
             dragPointerOffset = pointInTile
             dragFrame = frame
             previewOrderIDs = nil
@@ -210,25 +200,10 @@ final class OrcvGridView: NSView {
     override func mouseDragged(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
 
-        if let workspaceID = resizingWorkspaceID {
-            let delta = CGPoint(x: point.x - resizeStartPoint.x, y: point.y - resizeStartPoint.y)
-            let ratio = max(0.1, resizeStartSize.width / max(1.0, resizeStartSize.height))
-
-            // View space is Y-up. Dragging downward makes delta.y negative, which should grow size.
-            let widthDeltaFromX = delta.x
-            let widthDeltaFromY = (-delta.y) * ratio
-            let dominantWidthDelta = abs(widthDeltaFromX) >= abs(widthDeltaFromY) ? widthDeltaFromX : widthDeltaFromY
-
-            let newWidth = max(1.0, resizeStartSize.width + dominantWidthDelta)
-            let newSize = CGSize(width: newWidth, height: newWidth / ratio)
-            onResizeRequest?(workspaceID, newSize)
-            return
-        }
-
         guard let draggedID = dragWorkspaceID,
               let initialFrame = tileFrames[draggedID] ?? dragFrame else { return }
 
-        let distance = hypot(point.x - resizeStartPoint.x, point.y - resizeStartPoint.y)
+        let distance = hypot(point.x - dragStartPoint.x, point.y - dragStartPoint.y)
         if !dragDidMove, distance < dragStartThreshold {
             return
         }
@@ -270,12 +245,6 @@ final class OrcvGridView: NSView {
 
     override func mouseUp(with event: NSEvent) {
         _ = event
-        if let resizeWorkspaceID = resizingWorkspaceID {
-            resizingWorkspaceID = nil
-            onResizeCommit?(resizeWorkspaceID)
-            return
-        }
-
         guard let draggedID = dragWorkspaceID else { return }
         defer {
             dragWorkspaceID = nil
@@ -428,8 +397,6 @@ final class OrcvGridView: NSView {
             let layers = tileLayers[workspace.id] ?? makeTileLayers(hostLayer: hostLayer)
             tileLayers[workspace.id] = layers
 
-            let isFocused = workspace.id == focusedWorkspaceID
-            let isSelected = selectedWorkspaceIDs.contains(workspace.id)
             let isDragged = workspace.id == dragWorkspaceID
 
             if isDragged, let dragFrame {
@@ -443,8 +410,7 @@ final class OrcvGridView: NSView {
             layers.root.zPosition = isDragged ? 10.0 : 0.0
             layers.preview.frame = layers.root.bounds.insetBy(dx: 1.5, dy: 1.5)
             layers.overlay.frame = layers.root.bounds
-            layers.overlay.backgroundColor = NSColor.black.withAlphaComponent(isDragged ? 0.12 : (isSelected ? 0.18 : 0.25)).cgColor
-            layers.border.frame = layers.root.bounds
+            layers.overlay.backgroundColor = NSColor.clear.cgColor
 
             layers.title.frame = CGRect(x: 12, y: layers.root.bounds.height - 24, width: layers.root.bounds.width - 24, height: 18)
             if showsDisplayIDs {
@@ -456,25 +422,6 @@ final class OrcvGridView: NSView {
             }
             layers.subtitle.string = ""
             layers.subtitle.isHidden = true
-
-            if isFocused {
-                layers.border.borderColor = NSColor.controlAccentColor.cgColor
-                layers.border.borderWidth = 2.0
-            } else if isSelected {
-                layers.border.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.75).cgColor
-                layers.border.borderWidth = 1.5
-            } else {
-                layers.border.borderColor = NSColor.separatorColor.cgColor
-                layers.border.borderWidth = 1.0
-            }
-
-            let handleRect = CGRect(x: layers.root.bounds.width - 16, y: 0, width: 16, height: 16)
-            let handlePath = CGMutablePath()
-            handlePath.move(to: CGPoint(x: handleRect.minX + 3, y: handleRect.minY + 3))
-            handlePath.addLine(to: CGPoint(x: handleRect.maxX - 3, y: handleRect.minY + 3))
-            handlePath.addLine(to: CGPoint(x: handleRect.maxX - 3, y: handleRect.maxY - 3))
-            layers.handle.path = handlePath
-            layers.handle.isHidden = true
 
             if !suppressPreviewRebinds || layers.preview.contents == nil {
                 applyPreview(for: workspace, layers: layers)
@@ -500,7 +447,7 @@ final class OrcvGridView: NSView {
         preview.magnificationFilter = .linear
 
         let overlay = CALayer()
-        overlay.backgroundColor = NSColor.black.withAlphaComponent(0.25).cgColor
+        overlay.backgroundColor = NSColor.clear.cgColor
 
         let title = CATextLayer()
         title.contentsScale = NSScreen.main?.backingScaleFactor ?? 2.0
@@ -517,25 +464,13 @@ final class OrcvGridView: NSView {
         subtitle.alignmentMode = .left
         subtitle.isHidden = true
 
-        let handle = CAShapeLayer()
-        handle.strokeColor = NSColor.tertiaryLabelColor.cgColor
-        handle.fillColor = nil
-        handle.lineWidth = 1.5
-
-        let border = CALayer()
-        border.cornerRadius = tileCornerRadius
-        border.backgroundColor = NSColor.clear.cgColor
-
         root.addSublayer(preview)
         root.addSublayer(overlay)
         root.addSublayer(title)
         root.addSublayer(subtitle)
-        root.addSublayer(handle)
-        root.addSublayer(border)
-
         hostLayer.addSublayer(root)
 
-        return TileLayers(root: root, preview: preview, overlay: overlay, title: title, subtitle: subtitle, handle: handle, border: border)
+        return TileLayers(root: root, preview: preview, overlay: overlay, title: title, subtitle: subtitle)
     }
 
     private func applyPreview(for workspace: Workspace, layers: TileLayers) {
@@ -548,10 +483,7 @@ final class OrcvGridView: NSView {
         } else {
             layers.preview.contents = nil
             layers.preview.contentsRect = ReferenceRegion.fullDisplay.layerContentsRect
-            let isFocused = workspace.id == focusedWorkspaceID
-            layers.preview.backgroundColor = (isFocused
-                ? NSColor.controlAccentColor.withAlphaComponent(0.18)
-                : NSColor.controlBackgroundColor).cgColor
+            layers.preview.backgroundColor = NSColor.controlBackgroundColor.cgColor
         }
     }
 

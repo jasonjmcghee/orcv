@@ -6,6 +6,14 @@ final class ShortcutSettingsWindowController: NSWindowController {
     private var valueLabels: [ShortcutAction: NSTextField] = [:]
     private var recordButtons: [ShortcutAction: NSButton] = [:]
     private var stagedBindings: [ShortcutAction: String] = [:]
+    private var stagedScalingResizeModifierToken: String = ShortcutModifier.shift.rawValue
+    private var stagedZoomModifierToken: String = ShortcutModifier.command.rawValue
+    private var stagedJumpToSlotModifierToken: String = ShortcutModifier.option.rawValue
+    private var stagedSavepointModifierToken: String = ShortcutModifier.command.rawValue
+    private var scalingResizeModifierPopup: NSPopUpButton?
+    private var zoomModifierPopup: NSPopUpButton?
+    private var jumpToSlotModifierPopup: NSPopUpButton?
+    private var savepointModifierPopup: NSPopUpButton?
     private var recordingAction: ShortcutAction?
     private var localMonitor: Any?
     private var doubleModifierState: [ShortcutModifier: TimeInterval] = [:]
@@ -19,9 +27,15 @@ final class ShortcutSettingsWindowController: NSWindowController {
         for action in ShortcutAction.allCases {
             stagedBindings[action] = shortcutManager.bindingString(for: action)
         }
+        stagedScalingResizeModifierToken = ShortcutManager.scalingResizeModifierToken(
+            from: shortcutManager.scalingResizeModifierValue()
+        )
+        stagedZoomModifierToken = ShortcutManager.modifierToken(from: shortcutManager.zoomModifierValue())
+        stagedJumpToSlotModifierToken = ShortcutManager.modifierToken(from: shortcutManager.jumpToSlotModifierValue())
+        stagedSavepointModifierToken = ShortcutManager.modifierToken(from: shortcutManager.savepointModifierValue())
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 430),
+            contentRect: NSRect(x: 0, y: 0, width: 620, height: 590),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -49,6 +63,10 @@ final class ShortcutSettingsWindowController: NSWindowController {
         reloadStagedBindingsFromManager()
         stopRecording()
         refreshDisplayedBindings()
+        refreshScalingResizeModifierUI()
+        refreshZoomModifierUI()
+        refreshJumpToSlotModifierUI()
+        refreshSavepointModifierUI()
         super.showWindow(sender)
     }
 
@@ -66,7 +84,7 @@ final class ShortcutSettingsWindowController: NSWindowController {
             root.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
         ])
 
-        let note = NSTextField(labelWithString: "Click Record, then press a shortcut. Double-tap a modifier for Cmd+Cmd / Shift+Shift style bindings.")
+        let note = NSTextField(labelWithString: "Click Record, then press a shortcut. Double-tap a modifier for Cmd+Cmd / Shift+Shift style bindings. Modifier rows control zoom, jump/save digits, and scale-resize behavior.")
         note.textColor = .secondaryLabelColor
         note.font = NSFont.systemFont(ofSize: 12)
         note.lineBreakMode = .byWordWrapping
@@ -117,6 +135,79 @@ final class ShortcutSettingsWindowController: NSWindowController {
             stack.addArrangedSubview(row)
         }
 
+        let modifierDivider = NSBox()
+        modifierDivider.boxType = .separator
+        modifierDivider.translatesAutoresizingMaskIntoConstraints = false
+        modifierDivider.widthAnchor.constraint(equalToConstant: 560).isActive = true
+        stack.addArrangedSubview(modifierDivider)
+
+        func makeModifierPopup(action: Selector) -> NSPopUpButton {
+            let popup = NSPopUpButton(frame: .zero, pullsDown: false)
+            popup.font = NSFont.systemFont(ofSize: 12)
+            popup.translatesAutoresizingMaskIntoConstraints = false
+            popup.widthAnchor.constraint(equalToConstant: 170).isActive = true
+            for option in ShortcutManager.modifierOptions() {
+                popup.addItem(withTitle: option.label)
+                popup.lastItem?.representedObject = option.token
+            }
+            popup.target = self
+            popup.action = action
+            return popup
+        }
+
+        func addModifierRow(title: String, popup: NSPopUpButton, resetAction: Selector) {
+            let row = NSStackView()
+            row.orientation = .horizontal
+            row.alignment = .centerY
+            row.spacing = 10
+
+            let titleLabel = NSTextField(labelWithString: title)
+            titleLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+            titleLabel.alignment = .right
+            titleLabel.translatesAutoresizingMaskIntoConstraints = false
+            titleLabel.widthAnchor.constraint(equalToConstant: 170).isActive = true
+
+            let reset = NSButton(title: "Reset", target: self, action: resetAction)
+            reset.bezelStyle = .rounded
+
+            row.addArrangedSubview(titleLabel)
+            row.addArrangedSubview(popup)
+            row.addArrangedSubview(reset)
+            stack.addArrangedSubview(row)
+        }
+
+        let scalingPopup = makeModifierPopup(action: #selector(scalingResizeModifierChanged(_:)))
+        scalingResizeModifierPopup = scalingPopup
+        addModifierRow(
+            title: "Scaling Resize Modifier",
+            popup: scalingPopup,
+            resetAction: #selector(resetScalingResizeModifierPressed(_:))
+        )
+
+        let zoomPopup = makeModifierPopup(action: #selector(zoomModifierChanged(_:)))
+        zoomModifierPopup = zoomPopup
+        addModifierRow(
+            title: "Zoom Modifier",
+            popup: zoomPopup,
+            resetAction: #selector(resetZoomModifierPressed(_:))
+        )
+
+        let jumpPopup = makeModifierPopup(action: #selector(jumpToSlotModifierChanged(_:)))
+        jumpToSlotModifierPopup = jumpPopup
+        addModifierRow(
+            title: "Jump-to-Slot Modifier",
+            popup: jumpPopup,
+            resetAction: #selector(resetJumpToSlotModifierPressed(_:))
+        )
+
+        let savepointPopup = makeModifierPopup(action: #selector(savepointModifierChanged(_:)))
+        savepointModifierPopup = savepointPopup
+        addModifierRow(
+            title: "Savepoint Modifier",
+            popup: savepointPopup,
+            resetAction: #selector(resetSavepointModifierPressed(_:))
+        )
+
         let pathLabel = NSTextField(labelWithString: shortcutManager.shortcutsFilePath())
         pathLabel.textColor = .tertiaryLabelColor
         pathLabel.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
@@ -158,11 +249,27 @@ final class ShortcutSettingsWindowController: NSWindowController {
 
         refreshRecordingUI()
         refreshDisplayedBindings()
+        refreshScalingResizeModifierUI()
+        refreshZoomModifierUI()
+        refreshJumpToSlotModifierUI()
+        refreshSavepointModifierUI()
     }
 
     @objc
     private func savePressed() {
         stopRecording()
+        shortcutManager.updateScalingResizeModifier(
+            ShortcutManager.parseScalingResizeModifierToken(stagedScalingResizeModifierToken)
+        )
+        shortcutManager.updateZoomModifier(
+            ShortcutManager.parseModifierToken(stagedZoomModifierToken)
+        )
+        shortcutManager.updateJumpToSlotModifier(
+            ShortcutManager.parseModifierToken(stagedJumpToSlotModifierToken)
+        )
+        shortcutManager.updateSavepointModifier(
+            ShortcutManager.parseModifierToken(stagedSavepointModifierToken)
+        )
         shortcutManager.updateBindings(stagedBindings)
         close()
     }
@@ -172,6 +279,10 @@ final class ShortcutSettingsWindowController: NSWindowController {
         reloadStagedBindingsFromManager()
         stopRecording()
         refreshDisplayedBindings()
+        refreshScalingResizeModifierUI()
+        refreshZoomModifierUI()
+        refreshJumpToSlotModifierUI()
+        refreshSavepointModifierUI()
         close()
     }
 
@@ -197,6 +308,58 @@ final class ShortcutSettingsWindowController: NSWindowController {
             stopRecording()
         }
         refreshDisplayedBindings()
+    }
+
+    @objc
+    private func scalingResizeModifierChanged(_ sender: NSPopUpButton) {
+        guard let token = sender.selectedItem?.representedObject as? String else { return }
+        stagedScalingResizeModifierToken = token
+    }
+
+    @objc
+    private func zoomModifierChanged(_ sender: NSPopUpButton) {
+        guard let token = sender.selectedItem?.representedObject as? String else { return }
+        stagedZoomModifierToken = token
+    }
+
+    @objc
+    private func jumpToSlotModifierChanged(_ sender: NSPopUpButton) {
+        guard let token = sender.selectedItem?.representedObject as? String else { return }
+        stagedJumpToSlotModifierToken = token
+    }
+
+    @objc
+    private func savepointModifierChanged(_ sender: NSPopUpButton) {
+        guard let token = sender.selectedItem?.representedObject as? String else { return }
+        stagedSavepointModifierToken = token
+    }
+
+    @objc
+    private func resetScalingResizeModifierPressed(_ sender: NSButton) {
+        _ = sender
+        stagedScalingResizeModifierToken = ShortcutModifier.shift.rawValue
+        refreshScalingResizeModifierUI()
+    }
+
+    @objc
+    private func resetZoomModifierPressed(_ sender: NSButton) {
+        _ = sender
+        stagedZoomModifierToken = ShortcutModifier.command.rawValue
+        refreshZoomModifierUI()
+    }
+
+    @objc
+    private func resetJumpToSlotModifierPressed(_ sender: NSButton) {
+        _ = sender
+        stagedJumpToSlotModifierToken = ShortcutModifier.option.rawValue
+        refreshJumpToSlotModifierUI()
+    }
+
+    @objc
+    private func resetSavepointModifierPressed(_ sender: NSButton) {
+        _ = sender
+        stagedSavepointModifierToken = ShortcutModifier.command.rawValue
+        refreshSavepointModifierUI()
     }
 
     private func installRecordingMonitorIfNeeded() {
@@ -299,6 +462,46 @@ final class ShortcutSettingsWindowController: NSWindowController {
         }
     }
 
+    private func refreshScalingResizeModifierUI() {
+        guard let popup = scalingResizeModifierPopup else { return }
+        if let item = popup.itemArray.first(where: { ($0.representedObject as? String) == stagedScalingResizeModifierToken }) {
+            popup.select(item)
+            return
+        }
+        popup.selectItem(at: 0)
+        stagedScalingResizeModifierToken = popup.selectedItem?.representedObject as? String ?? ShortcutModifier.shift.rawValue
+    }
+
+    private func refreshZoomModifierUI() {
+        guard let popup = zoomModifierPopup else { return }
+        if let item = popup.itemArray.first(where: { ($0.representedObject as? String) == stagedZoomModifierToken }) {
+            popup.select(item)
+            return
+        }
+        popup.selectItem(at: 0)
+        stagedZoomModifierToken = popup.selectedItem?.representedObject as? String ?? ShortcutModifier.command.rawValue
+    }
+
+    private func refreshJumpToSlotModifierUI() {
+        guard let popup = jumpToSlotModifierPopup else { return }
+        if let item = popup.itemArray.first(where: { ($0.representedObject as? String) == stagedJumpToSlotModifierToken }) {
+            popup.select(item)
+            return
+        }
+        popup.selectItem(at: 0)
+        stagedJumpToSlotModifierToken = popup.selectedItem?.representedObject as? String ?? ShortcutModifier.option.rawValue
+    }
+
+    private func refreshSavepointModifierUI() {
+        guard let popup = savepointModifierPopup else { return }
+        if let item = popup.itemArray.first(where: { ($0.representedObject as? String) == stagedSavepointModifierToken }) {
+            popup.select(item)
+            return
+        }
+        popup.selectItem(at: 0)
+        stagedSavepointModifierToken = popup.selectedItem?.representedObject as? String ?? ShortcutModifier.command.rawValue
+    }
+
     private func refreshRecordingUI() {
         for action in ShortcutAction.allCases {
             guard let button = recordButtons[action] else { continue }
@@ -322,5 +525,11 @@ final class ShortcutSettingsWindowController: NSWindowController {
         for action in ShortcutAction.allCases {
             stagedBindings[action] = shortcutManager.bindingString(for: action)
         }
+        stagedScalingResizeModifierToken = ShortcutManager.scalingResizeModifierToken(
+            from: shortcutManager.scalingResizeModifierValue()
+        )
+        stagedZoomModifierToken = ShortcutManager.modifierToken(from: shortcutManager.zoomModifierValue())
+        stagedJumpToSlotModifierToken = ShortcutManager.modifierToken(from: shortcutManager.jumpToSlotModifierValue())
+        stagedSavepointModifierToken = ShortcutManager.modifierToken(from: shortcutManager.savepointModifierValue())
     }
 }
