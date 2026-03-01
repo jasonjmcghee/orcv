@@ -1406,10 +1406,13 @@ final class WorkspaceRootViewController: NSViewController {
     }
 
     private func displayIDs(at point: CGPoint) -> [CGDirectDisplayID] {
-        let maxDisplays: UInt32 = 16
-        var ids = [CGDirectDisplayID](repeating: 0, count: Int(maxDisplays))
+        var onlineDisplayCount: UInt32 = 0
+        guard CGGetOnlineDisplayList(0, nil, &onlineDisplayCount) == .success, onlineDisplayCount > 0 else {
+            return []
+        }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(onlineDisplayCount))
         var count: UInt32 = 0
-        let result = CGGetDisplaysWithPoint(point, maxDisplays, &ids, &count)
+        let result = CGGetDisplaysWithPoint(point, onlineDisplayCount, &ids, &count)
         guard result == .success, count > 0 else { return [] }
         return Array(ids.prefix(Int(count)))
     }
