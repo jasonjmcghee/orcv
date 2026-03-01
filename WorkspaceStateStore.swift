@@ -1,12 +1,19 @@
 import Foundation
 
 struct PersistedWorkspaceState: Codable {
+    struct CameraBookmark: Codable {
+        var magnification: Double
+        var offsetX: Double
+        var offsetY: Double
+    }
+
     struct WorkspaceEntry: Codable {
         var title: String
         var pixelWidth: Int
         var pixelHeight: Int
         var tileWidth: Double
         var tileHeight: Double
+        var displaySerial: UInt32?
         var canvasX: Double?
         var canvasY: Double?
     }
@@ -14,11 +21,13 @@ struct PersistedWorkspaceState: Codable {
     var version: Int
     var nextVirtualIndex: Int
     var focusedIndex: Int?
+    var focusedDisplaySerial: UInt32?
     var dynamicLayoutColumns: Int?
     var layoutModeRawValue: String?
     var canvasMagnification: Double?
     var canvasOffsetX: Double?
     var canvasOffsetY: Double?
+    var canvasSavepoints: [String: CameraBookmark]?
     var workspaces: [WorkspaceEntry]
 }
 

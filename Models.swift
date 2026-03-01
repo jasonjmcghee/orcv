@@ -7,7 +7,6 @@ enum WorkspaceKind {
 }
 
 enum WorkspaceLayoutMode: String {
-    case tile
     case canvas
 }
 

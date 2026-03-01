@@ -12,6 +12,7 @@ final class VirtualDisplayManager {
     }
 
     private var virtualDisplays: [CGDirectDisplayID: CGVirtualDisplay] = [:]
+    private var virtualDisplaySerials: [CGDirectDisplayID: UInt32] = [:]
     private var serialCounter: UInt32 = 100
 
     func mainDisplayProfile() -> DisplayProfile {
@@ -112,7 +113,8 @@ final class VirtualDisplayManager {
         width: Int,
         height: Int,
         hidpi: Bool = true,
-        physicalSizeMM: CGSize? = nil
+        physicalSizeMM: CGSize? = nil,
+        serialNumber: UInt32? = nil
     ) -> DisplayDescriptor? {
         let descriptor = CGVirtualDisplayDescriptor()
         descriptor.setDispatchQueue(DispatchQueue.main)
@@ -122,7 +124,8 @@ final class VirtualDisplayManager {
         descriptor.maxPixelsWide = UInt32(max(8192, requestedMaxWidth))
         descriptor.maxPixelsHigh = UInt32(max(8192, requestedMaxHeight))
         descriptor.sizeInMillimeters = physicalSizeMM ?? CGSize(width: 600, height: 340)
-        descriptor.serialNum = serialCounter
+        let assignedSerial = serialNumber ?? serialCounter
+        descriptor.serialNum = assignedSerial
         descriptor.productID = 0x1234
         descriptor.vendorID = 0x3456
 
@@ -138,9 +141,10 @@ final class VirtualDisplayManager {
             return nil
         }
 
-        serialCounter += 1
         let displayID = display.displayID
         virtualDisplays[displayID] = display
+        virtualDisplaySerials[displayID] = assignedSerial
+        serialCounter = max(serialCounter, assignedSerial &+ 1)
         let actualPixelSize = resolvedPixelSize(displayID: displayID, fallbackLogicalWidth: width, fallbackLogicalHeight: height, hidpi: hidpi)
 
         return DisplayDescriptor(
@@ -157,7 +161,7 @@ final class VirtualDisplayManager {
         fallbackLogicalHeight: Int,
         hidpi: Bool
     ) -> CGSize {
-        if let mode = CGDisplayCopyDisplayMode(displayID) {
+        if let mode = copyDisplayModeWithRetry(displayID: displayID) {
             let logicalW = max(1, Int(mode.width))
             let logicalH = max(1, Int(mode.height))
             let pixelW = max(1, Int(mode.pixelWidth))
@@ -185,15 +189,34 @@ final class VirtualDisplayManager {
         return CGSize(width: fallbackW, height: fallbackH)
     }
 
+    private func copyDisplayModeWithRetry(displayID: CGDirectDisplayID) -> CGDisplayMode? {
+        if let mode = CGDisplayCopyDisplayMode(displayID) {
+            return mode
+        }
+        for _ in 0..<5 {
+            usleep(25_000)
+            if let mode = CGDisplayCopyDisplayMode(displayID) {
+                return mode
+            }
+        }
+        return nil
+    }
+
     func removeVirtualDisplay(displayID: CGDirectDisplayID) -> Bool {
         guard virtualDisplays.removeValue(forKey: displayID) != nil else {
             return false
         }
+        virtualDisplaySerials.removeValue(forKey: displayID)
         return true
     }
 
     func removeAllVirtualDisplays() {
         virtualDisplays.removeAll()
+        virtualDisplaySerials.removeAll()
+    }
+
+    func virtualDisplaySerial(for displayID: CGDirectDisplayID) -> UInt32? {
+        virtualDisplaySerials[displayID]
     }
 
     func applyDisplayOrigins(_ origins: [CGDirectDisplayID: CGPoint]) -> Bool {

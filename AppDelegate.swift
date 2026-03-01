@@ -2,16 +2,13 @@ import AppKit
 import CoreGraphics
 import Foundation
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private static let mainWindowAutosaveName = "WorkspaceGridMainWindowFrame"
 
     private var window: NSWindow?
     private var rootViewController: WorkspaceRootViewController?
     private var shortcutManager: ShortcutManager?
     private var shortcutsWindowController: ShortcutSettingsWindowController?
-    private weak var macroMenu: NSMenu?
-    private weak var macroToggleMenuItem: NSMenuItem?
-    private weak var macroReplayMenuItem: NSMenuItem?
     private var terminateInProgress = false
     private var didShowMainWindow = false
 
@@ -49,6 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         window.title = "Workspace Grid"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
         window.backgroundColor = .windowBackgroundColor
         window.tabbingMode = .disallowed
         window.isReleasedWhenClosed = false
@@ -56,19 +54,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         window.animationBehavior = .none
         window.delegate = self
         window.contentViewController = root
+        applyChromelessWindowStyle(window)
 
         window.setFrameAutosaveName(Self.mainWindowAutosaveName)
         _ = window.setFrameUsingName(Self.mainWindowAutosaveName, force: false)
 
         self.window = window
         self.rootViewController = root
-        root.onMacroStateDidChange = { [weak self] in
-            self?.refreshMacroMenuItems()
-        }
         root.onInitialBootstrapComplete = { [weak self] in
             self?.showMainWindowWhenReady()
         }
-        refreshMacroMenuItems()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -147,6 +142,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         closeDisplayItem.keyEquivalentModifierMask = [.command]
         closeDisplayItem.target = self
         fileMenu.addItem(closeDisplayItem)
+        fileMenu.addItem(.separator())
+
+        let fullscreenSelectedItem = NSMenuItem(
+            title: "Fullscreen Selected",
+            action: #selector(showFullscreenSelected(_:)),
+            keyEquivalent: ""
+        )
+        fullscreenSelectedItem.target = self
+        fileMenu.addItem(fullscreenSelectedItem)
         fileMenuItem.submenu = fileMenu
 
         let editMenuItem = NSMenuItem()
@@ -170,103 +174,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         editMenu.addItem(redoItem)
         editMenuItem.submenu = editMenu
 
-        let layoutMenuItem = NSMenuItem()
-        mainMenu.addItem(layoutMenuItem)
+        let viewMenuItem = NSMenuItem()
+        mainMenu.addItem(viewMenuItem)
 
-        let layoutMenu = NSMenu(title: "Layout")
-        let fullWidthItem = NSMenuItem(
-            title: "Full Width Stack",
-            action: #selector(applyLayoutFullWidth(_:)),
-            keyEquivalent: "1"
+        let viewMenu = NSMenu(title: "View")
+        let resetZoomItem = NSMenuItem(
+            title: "Reset Zoom",
+            action: #selector(resetCanvasZoom(_:)),
+            keyEquivalent: ""
         )
-        fullWidthItem.keyEquivalentModifierMask = [.control, .option]
-        fullWidthItem.target = self
-        layoutMenu.addItem(fullWidthItem)
+        resetZoomItem.target = self
+        viewMenu.addItem(resetZoomItem)
 
-        let twoByTwoItem = NSMenuItem(
-            title: "2x2 Grid",
-            action: #selector(applyLayout2x2(_:)),
-            keyEquivalent: "2"
+        let jumpToOriginItem = NSMenuItem(
+            title: "Jump to Origin",
+            action: #selector(jumpToCanvasOrigin(_:)),
+            keyEquivalent: "o"
         )
-        twoByTwoItem.keyEquivalentModifierMask = [.control, .option]
-        twoByTwoItem.target = self
-        layoutMenu.addItem(twoByTwoItem)
+        jumpToOriginItem.keyEquivalentModifierMask = [.command, .option]
+        jumpToOriginItem.target = self
+        viewMenu.addItem(jumpToOriginItem)
 
-        let fullscreenSelectedItem = NSMenuItem(
-            title: "Fullscreen Selected Tile",
+        viewMenu.addItem(.separator())
+        let fullscreenItem = NSMenuItem(
+            title: "Fullscreen Selected",
             action: #selector(showFullscreenSelected(_:)),
             keyEquivalent: "f"
         )
-        fullscreenSelectedItem.keyEquivalentModifierMask = [.control, .option]
-        fullscreenSelectedItem.target = self
-        layoutMenu.addItem(fullscreenSelectedItem)
-
-        layoutMenu.addItem(.separator())
-
-        let tileModeItem = NSMenuItem(
-            title: "View Mode: Tile",
-            action: #selector(setViewModeTile(_:)),
-            keyEquivalent: ""
-        )
-        tileModeItem.target = self
-        layoutMenu.addItem(tileModeItem)
-
-        let canvasModeItem = NSMenuItem(
-            title: "View Mode: Canvas",
-            action: #selector(setViewModeCanvas(_:)),
-            keyEquivalent: ""
-        )
-        canvasModeItem.target = self
-        layoutMenu.addItem(canvasModeItem)
-
-        layoutMenu.addItem(.separator())
-
-        let dynamicSizingItem = NSMenuItem(
-            title: "Tile Size: Dynamic",
-            action: #selector(setTileSizingDynamic(_:)),
-            keyEquivalent: ""
-        )
-        dynamicSizingItem.target = self
-        layoutMenu.addItem(dynamicSizingItem)
-
-        let fixedSizingItem = NSMenuItem(
-            title: "Tile Size: Fixed (Reasonable)",
-            action: #selector(setTileSizingFixed(_:)),
-            keyEquivalent: ""
-        )
-        fixedSizingItem.target = self
-        layoutMenu.addItem(fixedSizingItem)
-
-        layoutMenuItem.submenu = layoutMenu
-
-        let macroMenuItem = NSMenuItem()
-        mainMenu.addItem(macroMenuItem)
-
-        let macroMenu = NSMenu(title: "Macro")
-        macroMenu.delegate = self
-
-        let toggleRecordItem = NSMenuItem(
-            title: "Record",
-            action: #selector(toggleMacroRecording(_:)),
-            keyEquivalent: "r"
-        )
-        toggleRecordItem.keyEquivalentModifierMask = [.control, .option]
-        toggleRecordItem.target = self
-        macroMenu.addItem(toggleRecordItem)
-
-        let replayItem = NSMenuItem(
-            title: "Replay",
-            action: #selector(replayMacro(_:)),
-            keyEquivalent: "r"
-        )
-        replayItem.keyEquivalentModifierMask = [.control, .option, .shift]
-        replayItem.target = self
-        macroMenu.addItem(replayItem)
-
-        macroMenuItem.submenu = macroMenu
-        self.macroMenu = macroMenu
-        self.macroToggleMenuItem = toggleRecordItem
-        self.macroReplayMenuItem = replayItem
+        fullscreenItem.keyEquivalentModifierMask = [.command, .shift]
+        fullscreenItem.target = self
+        viewMenu.addItem(fullscreenItem)
+        viewMenuItem.submenu = viewMenu
 
         NSApp.mainMenu = mainMenu
     }
@@ -289,7 +227,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let options: [NSApplication.AboutPanelOptionKey: Any] = [
             .applicationName: "Workspace Grid",
             .version: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0",
-            .credits: NSAttributedString(string: "Controls:\n• Click tile: focus/select one\n• Cmd+Click or Shift+Click: toggle multi-select\n• Click empty background: clear selection\n• Double-Command: teleport toggle"),
+            .credits: NSAttributedString(string: "Controls:\n• Drag displays to position them on canvas\n• Drag empty background to move the app window\n• Hold Space while hovering/focused to move window with cursor\n• Use Shortcuts settings to record key bindings"),
         ]
         NSApp.orderFrontStandardAboutPanel(options: options)
         NSApp.activate(ignoringOtherApps: true)
@@ -308,72 +246,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     @objc
-    private func applyLayoutFullWidth(_ sender: Any?) {
-        _ = sender
-        rootViewController?.menuApplyLayoutFullWidth()
-    }
-
-    @objc
-    private func applyLayout2x2(_ sender: Any?) {
-        _ = sender
-        rootViewController?.menuApplyLayout2x2()
-    }
-
-    @objc
     private func showFullscreenSelected(_ sender: Any?) {
         _ = sender
         rootViewController?.menuFullscreenSelected()
     }
 
     @objc
-    private func setViewModeTile(_ sender: Any?) {
+    private func resetCanvasZoom(_ sender: Any?) {
         _ = sender
-        rootViewController?.menuSetWorkspaceLayoutMode(.tile)
+        rootViewController?.menuResetCanvasZoom()
     }
 
     @objc
-    private func setViewModeCanvas(_ sender: Any?) {
+    private func jumpToCanvasOrigin(_ sender: Any?) {
         _ = sender
-        rootViewController?.menuSetWorkspaceLayoutMode(.canvas)
-    }
-
-    @objc
-    private func setTileSizingDynamic(_ sender: Any?) {
-        _ = sender
-        rootViewController?.menuSetTileSizingMode(.dynamic)
-    }
-
-    @objc
-    private func setTileSizingFixed(_ sender: Any?) {
-        _ = sender
-        rootViewController?.menuSetTileSizingMode(.fixed)
-    }
-
-    @objc
-    private func toggleMacroRecording(_ sender: Any?) {
-        _ = sender
-        rootViewController?.menuToggleRecording()
-        refreshMacroMenuItems()
-    }
-
-    @objc
-    private func replayMacro(_ sender: Any?) {
-        _ = sender
-        rootViewController?.menuReplayRecording()
-        refreshMacroMenuItems()
-    }
-
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        if menu === macroMenu {
-            refreshMacroMenuItems()
-        }
-    }
-
-    private func refreshMacroMenuItems() {
-        guard let state = rootViewController?.macroState() else { return }
-        macroToggleMenuItem?.title = state.isRecording ? "Stop Recording" : "Record"
-        macroToggleMenuItem?.isEnabled = !state.isReplaying || state.isRecording
-        macroReplayMenuItem?.isEnabled = state.hasRecording && !state.isRecording && !state.isReplaying
+        rootViewController?.menuJumpToCanvasOrigin()
     }
 
     func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? {
@@ -381,10 +268,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         return rootViewController?.undoManager
     }
 
+    func windowDidBecomeKey(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        applyChromelessWindowStyle(window)
+    }
+
     private func showMainWindowWhenReady() {
         guard !didShowMainWindow, let window else { return }
         didShowMainWindow = true
         window.makeKeyAndOrderFront(nil)
+        applyChromelessWindowStyle(window)
+        DispatchQueue.main.async { [weak self] in
+            guard let window = self?.window else { return }
+            self?.applyChromelessWindowStyle(window)
+        }
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func applyChromelessWindowStyle(_ window: NSWindow) {
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
+        let buttons = [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton]
+        for kind in buttons {
+            guard let button = window.standardWindowButton(kind) else { continue }
+            button.isHidden = true
+            button.isEnabled = false
+            button.alphaValue = 0.0
+        }
+        if let closeButton = window.standardWindowButton(.closeButton),
+           let titlebarContainer = closeButton.superview {
+            titlebarContainer.isHidden = true
+            titlebarContainer.alphaValue = 0.0
+        }
     }
 }

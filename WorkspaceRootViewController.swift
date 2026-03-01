@@ -3,6 +3,17 @@ import CoreGraphics
 import Foundation
 import IOSurface
 
+private final class CanvasZoomScrollView: NSScrollView {
+    var commandScrollHandler: ((NSEvent) -> Bool)?
+
+    override func scrollWheel(with event: NSEvent) {
+        if commandScrollHandler?(event) == true {
+            return
+        }
+        super.scrollWheel(with: event)
+    }
+}
+
 final class WorkspaceRootViewController: NSViewController {
     private struct CanvasCameraState {
         let magnification: CGFloat
@@ -23,8 +34,9 @@ final class WorkspaceRootViewController: NSViewController {
         self?.surface(for: reference)
     })
 
-    private let scrollView = NSScrollView(frame: .zero)
+    private let scrollView = CanvasZoomScrollView(frame: .zero)
     private let gridView = WorkspaceGridView(frame: .zero)
+    private let canvasBackdropView = NSVisualEffectView(frame: .zero)
     private let tileStatusOverlay = NSVisualEffectView(frame: .zero)
     private let tileStatusLabel = NSTextField(labelWithString: "")
     private let macroEngine = InputMacroEngine()
@@ -33,26 +45,30 @@ final class WorkspaceRootViewController: NSViewController {
     private var nextVirtualIndex: Int = 1
     private var localSwipeMonitor: Any?
     private var globalSwipeMonitor: Any?
+    private var localMagnifyMonitor: Any?
+    private var globalMagnifyMonitor: Any?
+    private var globalCommandScrollZoomMonitor: Any?
+    private var canvasBoundsObserver: NSObjectProtocol?
+    private var canvasCameraSaveDebounceWorkItem: DispatchWorkItem?
     private var windowLevelPollingTimer: Timer?
+    private var spaceFollowWindowTimer: Timer?
+    private var lastSpaceFollowMouseScreenPoint: CGPoint?
     private var isGridWindowFloating = false
     private var lastTeleportTime: TimeInterval = 0
-    private var lastCommandTapTimestamp: TimeInterval = 0
     private var lastImmersiveToggleTime: TimeInterval = 0
     private var immersiveTeleportWorkItem: DispatchWorkItem?
     private var arrangementDebounceWorkItem: DispatchWorkItem?
     private let arrangementDebounceInterval: TimeInterval = 1.0
     private let arrangementApplyQueue = DispatchQueue(label: "com.pointworks.workspacegrid.arrangement-apply", qos: .utility)
-    private var dynamicLayoutDebounceWorkItem: DispatchWorkItem?
     private var lastAppliedOrigins: [CGDirectDisplayID: CGPoint] = [:]
     private var lastAppliedArrangementSignature: UInt64?
     private var lastQueuedArrangementSignature: UInt64?
     private var arrangementGeneration: UInt64 = 0
     private var pendingArrangementSyncAfterLiveResize = false
     private var lastDisplayModeProbeTime: [CGDirectDisplayID: TimeInterval] = [:]
-    private var activeDynamicLayoutColumns: Int?
-    private var currentLayoutMode: WorkspaceLayoutMode = .tile
+    private var currentLayoutMode: WorkspaceLayoutMode = .canvas
     private var lastCanvasCamera: CanvasCameraState?
-    private var lastDynamicLayoutViewportWidth: CGFloat = 0
+    private var canvasSavepoints: [Int: CanvasCameraState] = [:]
     private var isRestoringState = false
     private var isTileResizeInProgress = false
     private var pendingStateSaveAfterResize = false
@@ -91,9 +107,22 @@ final class WorkspaceRootViewController: NSViewController {
         if let globalSwipeMonitor {
             NSEvent.removeMonitor(globalSwipeMonitor)
         }
+        if let localMagnifyMonitor {
+            NSEvent.removeMonitor(localMagnifyMonitor)
+        }
+        if let globalMagnifyMonitor {
+            NSEvent.removeMonitor(globalMagnifyMonitor)
+        }
+        if let globalCommandScrollZoomMonitor {
+            NSEvent.removeMonitor(globalCommandScrollZoomMonitor)
+        }
+        if let canvasBoundsObserver {
+            NotificationCenter.default.removeObserver(canvasBoundsObserver)
+        }
+        canvasCameraSaveDebounceWorkItem?.cancel()
         immersiveTeleportWorkItem?.cancel()
         windowLevelPollingTimer?.invalidate()
-        dynamicLayoutDebounceWorkItem?.cancel()
+        spaceFollowWindowTimer?.invalidate()
     }
 
     override var undoManager: UndoManager? {
@@ -103,7 +132,7 @@ final class WorkspaceRootViewController: NSViewController {
     override func loadView() {
         view = NSView(frame: NSRect(x: 0, y: 0, width: 1280, height: 820))
         view.wantsLayer = true
-        view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        view.layer?.backgroundColor = NSColor.clear.cgColor
         setupUI()
         wireActions()
         bootstrapDisplays()
@@ -112,41 +141,41 @@ final class WorkspaceRootViewController: NSViewController {
     override func viewDidAppear() {
         super.viewDidAppear()
         installWindowLevelMonitorIfNeeded()
+        installSpaceFollowWindowMonitorIfNeeded()
         refreshGridWindowLevelForPointerMapping()
     }
 
     override func viewWillDisappear() {
         super.viewWillDisappear()
         teardownWindowLevelMonitor()
+        teardownSpaceFollowWindowMonitor()
     }
 
     override func viewDidLayout() {
         super.viewDidLayout()
         layoutGridDocumentView()
-        if currentLayoutMode == .tile {
-            if view.window?.inLiveResize == true {
-                scheduleDynamicLayoutRefreshDuringLiveResize()
-            } else {
-                dynamicLayoutDebounceWorkItem?.cancel()
-                refreshDynamicPresetLayoutForViewportIfNeeded()
-                flushPendingArrangementSyncAfterLiveResizeIfNeeded()
-            }
-        } else {
-            dynamicLayoutDebounceWorkItem?.cancel()
-            flushPendingArrangementSyncAfterLiveResizeIfNeeded()
-        }
+        flushPendingArrangementSyncAfterLiveResizeIfNeeded()
     }
 
     private func setupUI() {
+        canvasBackdropView.translatesAutoresizingMaskIntoConstraints = false
+        canvasBackdropView.material = .underWindowBackground
+        canvasBackdropView.blendingMode = .behindWindow
+        canvasBackdropView.state = .active
+
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.drawsBackground = false
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
         scrollView.borderType = .noBorder
+        scrollView.contentView.postsBoundsChangedNotifications = true
         scrollView.allowsMagnification = false
         scrollView.minMagnification = 1.0
         scrollView.maxMagnification = 1.0
+        scrollView.commandScrollHandler = { [weak self] event in
+            self?.handleCanvasCommandScrollZoom(event, requireUnfocusedWindow: false) == true
+        }
 
         gridView.frame = NSRect(x: 0, y: 0, width: 1200, height: 720)
         scrollView.documentView = gridView
@@ -166,11 +195,17 @@ final class WorkspaceRootViewController: NSViewController {
 
         tileStatusOverlay.addSubview(tileStatusLabel)
 
+        view.addSubview(canvasBackdropView)
         view.addSubview(scrollView)
         view.addSubview(tileStatusOverlay)
 
         NSLayoutConstraint.activate([
-            scrollView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            canvasBackdropView.topAnchor.constraint(equalTo: view.topAnchor),
+            canvasBackdropView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            canvasBackdropView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            canvasBackdropView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+
+            scrollView.topAnchor.constraint(equalTo: view.topAnchor),
             scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
@@ -200,12 +235,6 @@ final class WorkspaceRootViewController: NSViewController {
 
         shortcutManager.onDidChange = { [weak self] in
             DispatchQueue.main.async {
-                if self?.shortcutManager.tileSizingMode == .fixed {
-                    self?.activeDynamicLayoutColumns = nil
-                    self?.applyFixedReasonableTileSizing()
-                } else {
-                    self?.lastDynamicLayoutViewportWidth = 0
-                }
                 self?.renderStore()
             }
         }
@@ -224,15 +253,17 @@ final class WorkspaceRootViewController: NSViewController {
         gridView.onBackgroundClick = { [weak self] in
             self?.workspaceStore.clearSelection()
         }
+        gridView.onBackgroundWindowDragRequest = { [weak self] event in
+            guard let self, let window = self.view.window else { return }
+            if !self.isWorkspaceGridWindowFocused() {
+                NSApp.activate(ignoringOtherApps: true)
+            }
+            window.performDrag(with: event)
+        }
 
         gridView.onResizeRequest = { [weak self] workspaceID, newSize in
             guard let self else { return }
-            if self.shortcutManager.tileSizingMode == .fixed {
-                self.applyFixedReasonableTileSizing()
-            } else {
-                self.activeDynamicLayoutColumns = nil
-                self.workspaceStore.resizeAllWorkspaces(from: workspaceID, tileSize: newSize)
-            }
+            self.workspaceStore.resizeAllWorkspaces(from: workspaceID, tileSize: newSize)
         }
 
         gridView.onResizeBegin = { [weak self] _ in
@@ -274,7 +305,7 @@ final class WorkspaceRootViewController: NSViewController {
             self?.scheduleArrangementSync()
         }
 
-        gridView.layoutMode = currentLayoutMode
+        gridView.layoutMode = .canvas
 
         gridView.referenceProvider = { [weak self] workspace in
             self?.reference(for: workspace) ?? SurfaceReference(displayID: workspace.displayID)
@@ -306,6 +337,9 @@ final class WorkspaceRootViewController: NSViewController {
         }
 
         installSwipeMonitorsIfNeeded()
+        installMagnificationMonitorIfNeeded()
+        installCommandScrollZoomMonitorIfNeeded()
+        installCanvasCameraPersistenceObserverIfNeeded()
         updateMacroControls()
     }
 
@@ -556,6 +590,108 @@ final class WorkspaceRootViewController: NSViewController {
         }
     }
 
+    private func installMagnificationMonitorIfNeeded() {
+        if localMagnifyMonitor == nil {
+            localMagnifyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.magnify]) { [weak self] event in
+                guard let self else { return event }
+                let consumed = self.handleCanvasMagnify(event, requireUnfocusedWindow: true)
+                return consumed ? nil : event
+            }
+        }
+        guard globalMagnifyMonitor == nil else { return }
+        globalMagnifyMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.magnify]) { [weak self] event in
+            DispatchQueue.main.async {
+                _ = self?.handleCanvasMagnify(event, requireUnfocusedWindow: true)
+            }
+        }
+    }
+
+    @discardableResult
+    private func handleCanvasMagnify(_ event: NSEvent, requireUnfocusedWindow: Bool) -> Bool {
+        guard currentLayoutMode == .canvas else { return false }
+        guard let window = view.window, window.isVisible else { return false }
+        if requireUnfocusedWindow, isWorkspaceGridWindowFocused() {
+            return false
+        }
+
+        let delta = event.magnification
+        guard delta.isFinite, abs(delta) > 0.0001 else { return false }
+
+        let mouseInScreen = NSEvent.mouseLocation
+        let mouseInWindow = window.convertPoint(fromScreen: mouseInScreen)
+        let mouseInScrollView = scrollView.convert(mouseInWindow, from: nil)
+        guard scrollView.bounds.contains(mouseInScrollView) else { return false }
+        return applyCanvasZoom(magnificationDelta: delta, anchorWindowPoint: mouseInWindow)
+    }
+
+    private func installCommandScrollZoomMonitorIfNeeded() {
+        guard globalCommandScrollZoomMonitor == nil else { return }
+        globalCommandScrollZoomMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.scrollWheel]) { [weak self] event in
+            DispatchQueue.main.async {
+                _ = self?.handleCanvasCommandScrollZoom(event, requireUnfocusedWindow: true)
+            }
+        }
+    }
+
+    @discardableResult
+    private func handleCanvasCommandScrollZoom(_ event: NSEvent, requireUnfocusedWindow: Bool) -> Bool {
+        guard currentLayoutMode == .canvas else { return false }
+        guard let window = view.window, window.isVisible else { return false }
+        if requireUnfocusedWindow, isWorkspaceGridWindowFocused() {
+            return false
+        }
+
+        guard isZoomModifierActive(for: event) else { return false }
+
+        let mouseInScreen = NSEvent.mouseLocation
+        let mouseInWindow = window.convertPoint(fromScreen: mouseInScreen)
+        let mouseInScrollView = scrollView.convert(mouseInWindow, from: nil)
+        guard scrollView.bounds.contains(mouseInScrollView) else { return false }
+
+        // Use whichever axis is dominant so Shift+wheel and horizontal wheels still zoom.
+        let rawDeltaX = event.scrollingDeltaX
+        let rawDeltaY = event.scrollingDeltaY
+        let rawDelta = abs(rawDeltaY) >= abs(rawDeltaX) ? rawDeltaY : rawDeltaX
+        guard rawDelta.isFinite else { return false }
+
+        let normalizedDelta = event.hasPreciseScrollingDeltas ? rawDelta : rawDelta * 10.0
+        guard abs(normalizedDelta) > 0.001 else { return false }
+
+        // Keep zoom feel closer to canvas pan speed.
+        let gain: CGFloat = event.hasPreciseScrollingDeltas ? 0.006 : 0.012
+        let magnificationDelta = max(-0.12, min(0.12, normalizedDelta * gain))
+        return applyCanvasZoom(magnificationDelta: magnificationDelta, anchorWindowPoint: mouseInWindow)
+    }
+
+    private func isZoomModifierActive(for event: NSEvent) -> Bool {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if mods.contains(.command) {
+            return true
+        }
+        return CGEventSource.keyState(.combinedSessionState, key: 55) ||
+            CGEventSource.keyState(.combinedSessionState, key: 54)
+    }
+
+    @discardableResult
+    private func applyCanvasZoom(magnificationDelta: CGFloat, anchorWindowPoint: CGPoint) -> Bool {
+        guard currentLayoutMode == .canvas else { return false }
+        guard magnificationDelta.isFinite, abs(magnificationDelta) > 0.0001 else { return false }
+
+        let currentMag = scrollView.magnification
+        let scaleFactor = max(0.05, 1.0 + magnificationDelta)
+        let targetMag = currentMag * scaleFactor
+        let clampedMag = max(scrollView.minMagnification, min(scrollView.maxMagnification, targetMag))
+        guard abs(clampedMag - currentMag) > 0.0001 else { return false }
+
+        let mouseInClipView = scrollView.contentView.convert(anchorWindowPoint, from: nil)
+        let centerInDocument = gridView.convert(mouseInClipView, from: scrollView.contentView)
+        scrollView.setMagnification(clampedMag, centeredAt: centerInDocument)
+        lastCanvasCamera = currentCanvasCameraState() ?? lastCanvasCamera
+
+        scheduleStateSave()
+        return true
+    }
+
     private func installWindowLevelMonitorIfNeeded() {
         guard windowLevelPollingTimer == nil else { return }
         let timer = Timer(timeInterval: 0.12, repeats: true) { [weak self] _ in
@@ -573,6 +709,82 @@ final class WorkspaceRootViewController: NSViewController {
         } else {
             isGridWindowFloating = false
         }
+    }
+
+    private func installSpaceFollowWindowMonitorIfNeeded() {
+        guard spaceFollowWindowTimer == nil else { return }
+        let timer = Timer(timeInterval: 1.0 / 90.0, repeats: true) { [weak self] _ in
+            self?.updateSpaceFollowWindowIfNeeded()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        spaceFollowWindowTimer = timer
+    }
+
+    private func teardownSpaceFollowWindowMonitor() {
+        spaceFollowWindowTimer?.invalidate()
+        spaceFollowWindowTimer = nil
+        lastSpaceFollowMouseScreenPoint = nil
+    }
+
+    private func updateSpaceFollowWindowIfNeeded() {
+        guard let window = view.window, window.isVisible else {
+            lastSpaceFollowMouseScreenPoint = nil
+            return
+        }
+        guard !previewWindowController.isPresenting else {
+            lastSpaceFollowMouseScreenPoint = nil
+            return
+        }
+
+        let spaceDown = CGEventSource.keyState(.combinedSessionState, key: 49)
+        let commandDown = CGEventSource.keyState(.combinedSessionState, key: 55) ||
+            CGEventSource.keyState(.combinedSessionState, key: 54)
+        let optionDown = CGEventSource.keyState(.combinedSessionState, key: 58) ||
+            CGEventSource.keyState(.combinedSessionState, key: 61)
+        let controlDown = CGEventSource.keyState(.combinedSessionState, key: 59) ||
+            CGEventSource.keyState(.combinedSessionState, key: 62)
+        let plainSpaceDown = spaceDown && !commandDown && !optionDown && !controlDown
+        let mouseInScreen = NSEvent.mouseLocation
+        let hoveringWindow = window.frame.contains(mouseInScreen)
+        let canFollow = plainSpaceDown && (hoveringWindow || isWorkspaceGridWindowFocused())
+
+        guard canFollow else {
+            lastSpaceFollowMouseScreenPoint = nil
+            return
+        }
+
+        if let last = lastSpaceFollowMouseScreenPoint {
+            let dx = mouseInScreen.x - last.x
+            let dy = mouseInScreen.y - last.y
+            if abs(dx) > 0.01 || abs(dy) > 0.01 {
+                let newOrigin = CGPoint(x: window.frame.origin.x + dx, y: window.frame.origin.y + dy)
+                window.setFrameOrigin(newOrigin)
+            }
+        }
+        lastSpaceFollowMouseScreenPoint = mouseInScreen
+    }
+
+    private func installCanvasCameraPersistenceObserverIfNeeded() {
+        guard canvasBoundsObserver == nil else { return }
+        canvasBoundsObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification,
+            object: scrollView.contentView,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            guard self.currentLayoutMode == .canvas else { return }
+            self.lastCanvasCamera = self.currentCanvasCameraState() ?? self.lastCanvasCamera
+            self.scheduleCanvasCameraSaveDebounced()
+        }
+    }
+
+    private func scheduleCanvasCameraSaveDebounced() {
+        canvasCameraSaveDebounceWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.scheduleStateSave()
+        }
+        canvasCameraSaveDebounceWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: work)
     }
 
     private func refreshGridWindowLevelForPointerMapping() {
@@ -611,19 +823,26 @@ final class WorkspaceRootViewController: NSViewController {
 
     private func handleNavigationEvent(_ event: NSEvent) -> Bool {
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let shortcutMods = mods.intersection([.control, .option, .command, .shift])
         applyTileLabelMode(modifiers: mods)
+        if event.type == .keyDown {
+            if let slot = digitSlotForNavigationEvent(event) {
+                if shortcutMods == [.command] {
+                    guard isWorkspaceGridWindowFocused() else { return false }
+                    _ = saveCanvasSavepoint(slot: slot)
+                    return true
+                }
+                if shortcutMods.isEmpty {
+                    guard isWorkspaceGridWindowFocused() else { return false }
+                    _ = recallCanvasSavepoint(slot: slot)
+                    return true
+                }
+            }
 
-        if maybeHandleDoubleCommandTap(event) {
-            return true
-        }
-
-        if event.type != .keyDown {
-            return false
-        }
-
-        if event.keyCode == 3, mods == [.control, .option] {
-            openFullscreenForFocusedWorkspace()
-            return true
+            if event.keyCode == 49, shortcutMods.isEmpty {
+                // Keep plain space available for "follow window" mode without system beep.
+                return true
+            }
         }
 
         guard let action = shortcutManager.action(for: event) else { return false }
@@ -651,56 +870,43 @@ final class WorkspaceRootViewController: NSViewController {
         case .focusPrevious:
             workspaceStore.focusPreviousWorkspace()
             return true
-        case .layoutFullWidth:
-            applyLayout(columns: 1)
-            return true
-        case .layout2x2:
-            applyLayout(columns: 2)
-            return true
         case .fullscreenSelected:
             openFullscreenForFocusedWorkspace()
             return true
         }
     }
 
+    private func digitSlotForNavigationEvent(_ event: NSEvent) -> Int? {
+        guard event.type == .keyDown else { return nil }
+        switch event.keyCode {
+        case 29, 82:
+            return 0
+        case 18, 83:
+            return 1
+        case 19, 84:
+            return 2
+        case 20, 85:
+            return 3
+        case 21, 86:
+            return 4
+        case 23, 87:
+            return 5
+        case 22, 88:
+            return 6
+        case 26, 89:
+            return 7
+        case 28, 91:
+            return 8
+        case 25, 92:
+            return 9
+        default:
+            return nil
+        }
+    }
+
     private func isWorkspaceGridWindowFocused() -> Bool {
         guard NSApp.isActive, let window = view.window else { return false }
         return NSApp.keyWindow === window || NSApp.mainWindow === window
-    }
-
-    private func maybeHandleDoubleCommandTap(_ event: NSEvent) -> Bool {
-        guard event.type == .flagsChanged else { return false }
-        guard event.keyCode == 55 || event.keyCode == 54 else { return false } // left/right command
-
-        let isDown = CGEventSource.keyState(.combinedSessionState, key: event.keyCode)
-        guard isDown else { return false }
-
-        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        guard mods == [.command] else {
-            lastCommandTapTimestamp = 0
-            return false
-        }
-
-        let now = event.timestamp
-        if lastCommandTapTimestamp > 0, now - lastCommandTapTimestamp <= 0.5 {
-            lastCommandTapTimestamp = 0
-
-            if previewWindowController.isPresenting {
-                previewWindowController.closePreview()
-                return true
-            }
-
-            let uptime = ProcessInfo.processInfo.systemUptime
-            if uptime - lastTeleportTime < 0.12 {
-                return false
-            }
-            lastTeleportTime = uptime
-            toggleTeleport()
-            return true
-        }
-
-        lastCommandTapTimestamp = now
-        return false
     }
 
     private func toggleTeleport() {
@@ -952,41 +1158,6 @@ final class WorkspaceRootViewController: NSViewController {
         return sorted[mid]
     }
 
-    private func applyLayout(columns: Int) {
-        guard !workspaceStore.workspaces.isEmpty else { return }
-        let before = tileSizesSnapshot()
-
-        if shortcutManager.tileSizingMode == .dynamic {
-            activeDynamicLayoutColumns = columns
-            lastDynamicLayoutViewportWidth = 0
-        } else {
-            activeDynamicLayoutColumns = nil
-        }
-
-        let sizes: [UUID: CGSize] = Dictionary(uniqueKeysWithValues:
-            workspaceStore.workspaces.map { workspace in
-                (workspace.id, gridView.tileSize(for: workspace.displayPixelSize, columns: columns))
-            }
-        )
-        workspaceStore.setTileSizes(sizes)
-        scheduleArrangementSync()
-        registerTileSizeUndo(from: before, to: tileSizesSnapshot(), actionName: "Layout")
-    }
-
-    private func applyFixedReasonableTileSizing() {
-        guard !workspaceStore.workspaces.isEmpty else { return }
-        let before = tileSizesSnapshot()
-        activeDynamicLayoutColumns = nil
-        let sizes: [UUID: CGSize] = Dictionary(uniqueKeysWithValues:
-            workspaceStore.workspaces.map { workspace in
-                (workspace.id, gridView.reasonableFixedTileSize(for: workspace.displayPixelSize))
-            }
-        )
-        workspaceStore.setTileSizes(sizes)
-        scheduleArrangementSync()
-        registerTileSizeUndo(from: before, to: tileSizesSnapshot(), actionName: "Resize Tiles")
-    }
-
     private func openFullscreenForFocusedWorkspace() {
         immersiveTeleportWorkItem?.cancel()
         immersiveTeleportWorkItem = nil
@@ -1031,16 +1202,8 @@ final class WorkspaceRootViewController: NSViewController {
         let pixelSize = systemDisplayPixelSize(for: displayID) ?? fallbackSize
         guard pixelSize.width > 1, pixelSize.height > 1 else { return }
 
-        guard let changedWorkspaceID = workspaceStore.updateDisplayPixelSize(displayID: displayID, pixelSize: pixelSize) else {
+        guard workspaceStore.updateDisplayPixelSize(displayID: displayID, pixelSize: pixelSize) != nil else {
             return
-        }
-
-        if shortcutManager.tileSizingMode == .dynamic {
-            if activeDynamicLayoutColumns != nil {
-                refreshDynamicPresetLayoutForViewportIfNeeded(force: true)
-            } else if let workspace = workspaceStore.workspace(with: changedWorkspaceID) {
-                workspaceStore.resizeWorkspace(workspaceID: workspace.id, tileSize: workspace.tileSize)
-            }
         }
 
         streamManager.configureStreams(for: currentDisplayDescriptors())
@@ -1057,29 +1220,6 @@ final class WorkspaceRootViewController: NSViewController {
         return CGSize(width: width, height: height)
     }
 
-    private func refreshDynamicPresetLayoutForViewportIfNeeded(force: Bool = false) {
-        guard currentLayoutMode == .tile,
-              shortcutManager.tileSizingMode == .dynamic,
-              let columns = activeDynamicLayoutColumns,
-              !workspaceStore.workspaces.isEmpty else {
-            return
-        }
-
-        let viewportWidth = tileLayoutViewportWidth()
-        if !force {
-            guard abs(viewportWidth - lastDynamicLayoutViewportWidth) > 1.0 else { return }
-        }
-        lastDynamicLayoutViewportWidth = viewportWidth
-
-        let sizes: [UUID: CGSize] = Dictionary(uniqueKeysWithValues:
-            workspaceStore.workspaces.map { workspace in
-                (workspace.id, gridView.tileSize(for: workspace.displayPixelSize, columns: columns))
-            }
-        )
-        workspaceStore.setTileSizes(sizes)
-        scheduleArrangementSync()
-    }
-
     private func tileLayoutViewportWidth() -> CGFloat {
         let baseWidth = max(1.0, scrollView.bounds.width)
         guard scrollView.scrollerStyle == .legacy, scrollView.hasVerticalScroller else {
@@ -1092,15 +1232,6 @@ final class WorkspaceRootViewController: NSViewController {
         return max(1.0, baseWidth - scrollerWidth)
     }
 
-    private func scheduleDynamicLayoutRefreshDuringLiveResize() {
-        dynamicLayoutDebounceWorkItem?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            self?.refreshDynamicPresetLayoutForViewportIfNeeded()
-        }
-        dynamicLayoutDebounceWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
-    }
-
     private func flushPendingArrangementSyncAfterLiveResizeIfNeeded() {
         guard pendingArrangementSyncAfterLiveResize else { return }
         guard view.window?.inLiveResize != true else { return }
@@ -1109,34 +1240,19 @@ final class WorkspaceRootViewController: NSViewController {
     }
 
     private func applyInteractionMode() {
-        switch currentLayoutMode {
-        case .tile:
-            if abs(scrollView.magnification - 1.0) > 0.001 {
-                let center = NSPoint(x: scrollView.contentView.bounds.midX, y: scrollView.contentView.bounds.midY)
-                scrollView.setMagnification(1.0, centeredAt: center)
-            }
-            scrollView.allowsMagnification = false
-            scrollView.minMagnification = 1.0
-            scrollView.maxMagnification = 1.0
-            scrollView.hasVerticalScroller = true
-            scrollView.hasHorizontalScroller = false
-            scrollView.usesPredominantAxisScrolling = true
-            scrollView.verticalScrollElasticity = .automatic
-            scrollView.horizontalScrollElasticity = .none
-        case .canvas:
-            scrollView.minMagnification = 0.35
-            scrollView.maxMagnification = 3.0
-            scrollView.allowsMagnification = true
-            if scrollView.magnification < scrollView.minMagnification || scrollView.magnification > scrollView.maxMagnification {
-                let center = NSPoint(x: scrollView.contentView.bounds.midX, y: scrollView.contentView.bounds.midY)
-                scrollView.setMagnification(1.0, centeredAt: center)
-            }
-            scrollView.hasVerticalScroller = false
-            scrollView.hasHorizontalScroller = false
-            scrollView.usesPredominantAxisScrolling = false
-            scrollView.verticalScrollElasticity = .automatic
-            scrollView.horizontalScrollElasticity = .automatic
+        canvasBackdropView.isHidden = false
+        scrollView.minMagnification = 0.35
+        scrollView.maxMagnification = 3.0
+        scrollView.allowsMagnification = true
+        if scrollView.magnification < scrollView.minMagnification || scrollView.magnification > scrollView.maxMagnification {
+            let center = NSPoint(x: scrollView.contentView.bounds.midX, y: scrollView.contentView.bounds.midY)
+            scrollView.setMagnification(1.0, centeredAt: center)
         }
+        scrollView.hasVerticalScroller = false
+        scrollView.hasHorizontalScroller = false
+        scrollView.usesPredominantAxisScrolling = false
+        scrollView.verticalScrollElasticity = .automatic
+        scrollView.horizontalScrollElasticity = .automatic
     }
 
     private func centerCanvasViewport() {
@@ -1180,6 +1296,63 @@ final class WorkspaceRootViewController: NSViewController {
         scrollView.contentView.scroll(to: origin)
         scrollView.reflectScrolledClipView(scrollView.contentView)
         lastCanvasCamera = CanvasCameraState(magnification: clampedMag, origin: origin)
+    }
+
+    private func saveCanvasSavepoint(slot: Int) -> Bool {
+        guard (0...9).contains(slot) else { return false }
+        guard let camera = (currentLayoutMode == .canvas ? currentCanvasCameraState() : nil)
+            ?? lastCanvasCamera
+            ?? defaultCanvasCameraState() else { return false }
+        canvasSavepoints[slot] = camera
+        lastCanvasCamera = camera
+        scheduleStateSave()
+        return true
+    }
+
+    private func recallCanvasSavepoint(slot: Int) -> Bool {
+        guard (0...9).contains(slot), let camera = canvasSavepoints[slot] else { return false }
+        lastCanvasCamera = camera
+        applyCanvasCamera(camera)
+        scheduleStateSave()
+        return true
+    }
+
+    private func defaultCanvasCameraState() -> CanvasCameraState? {
+        let viewport = scrollView.contentView.bounds.size
+        guard viewport.width > 1, viewport.height > 1 else { return nil }
+        let origin = gridView.canvasInitialViewportOrigin(for: viewport)
+        guard origin.x.isFinite, origin.y.isFinite else { return nil }
+        return CanvasCameraState(magnification: 1.0, origin: origin)
+    }
+
+    private func persistedCanvasSavepoints() -> [String: PersistedWorkspaceState.CameraBookmark]? {
+        guard !canvasSavepoints.isEmpty else { return nil }
+        var encoded: [String: PersistedWorkspaceState.CameraBookmark] = [:]
+        for (slot, camera) in canvasSavepoints where (0...9).contains(slot) {
+            encoded[String(slot)] = PersistedWorkspaceState.CameraBookmark(
+                magnification: Double(camera.magnification),
+                offsetX: Double(camera.origin.x),
+                offsetY: Double(camera.origin.y)
+            )
+        }
+        return encoded.isEmpty ? nil : encoded
+    }
+
+    private func restoredCanvasSavepoints(from persisted: PersistedWorkspaceState) -> [Int: CanvasCameraState] {
+        guard let raw = persisted.canvasSavepoints, !raw.isEmpty else { return [:] }
+        var decoded: [Int: CanvasCameraState] = [:]
+        for (slotKey, bookmark) in raw {
+            guard let slot = Int(slotKey), (0...9).contains(slot) else { continue }
+            let magnification = CGFloat(bookmark.magnification)
+            let x = CGFloat(bookmark.offsetX)
+            let y = CGFloat(bookmark.offsetY)
+            guard magnification.isFinite, magnification > 0, x.isFinite, y.isFinite else { continue }
+            decoded[slot] = CanvasCameraState(
+                magnification: magnification,
+                origin: CGPoint(x: x, y: y)
+            )
+        }
+        return decoded
     }
 
     private func applyTileLabelMode(modifiers: NSEvent.ModifierFlags) {
@@ -1266,6 +1439,13 @@ final class WorkspaceRootViewController: NSViewController {
             guard let focusedID = workspaceStore.focusedWorkspaceID else { return nil }
             return virtual.firstIndex(where: { $0.id == focusedID })
         }()
+        let focusedDisplaySerial: UInt32? = {
+            guard let focusedID = workspaceStore.focusedWorkspaceID,
+                  let focusedWorkspace = virtual.first(where: { $0.id == focusedID }) else {
+                return nil
+            }
+            return displayManager.virtualDisplaySerial(for: focusedWorkspace.displayID)
+        }()
 
         let entries = virtual.map { workspace in
             let canvasX = workspace.canvasOrigin.map { Double($0.x) }
@@ -1276,27 +1456,25 @@ final class WorkspaceRootViewController: NSViewController {
                 pixelHeight: max(1, Int(workspace.displayPixelSize.height.rounded())),
                 tileWidth: workspace.tileSize.width,
                 tileHeight: workspace.tileSize.height,
+                displaySerial: displayManager.virtualDisplaySerial(for: workspace.displayID),
                 canvasX: canvasX,
                 canvasY: canvasY
             )
         }
 
-        let cameraToPersist: CanvasCameraState? = {
-            if currentLayoutMode == .canvas {
-                return currentCanvasCameraState() ?? lastCanvasCamera
-            }
-            return lastCanvasCamera
-        }()
+        let cameraToPersist = currentCanvasCameraState() ?? lastCanvasCamera
 
         return PersistedWorkspaceState(
             version: 1,
             nextVirtualIndex: nextVirtualIndex,
             focusedIndex: focusedIndex,
-            dynamicLayoutColumns: activeDynamicLayoutColumns,
-            layoutModeRawValue: currentLayoutMode.rawValue,
+            focusedDisplaySerial: focusedDisplaySerial,
+            dynamicLayoutColumns: nil,
+            layoutModeRawValue: WorkspaceLayoutMode.canvas.rawValue,
             canvasMagnification: cameraToPersist.map { Double($0.magnification) },
             canvasOffsetX: cameraToPersist.map { Double($0.origin.x) },
             canvasOffsetY: cameraToPersist.map { Double($0.origin.y) },
+            canvasSavepoints: persistedCanvasSavepoints(),
             workspaces: entries
         )
     }
@@ -1305,27 +1483,26 @@ final class WorkspaceRootViewController: NSViewController {
         let workspaces: [Workspace]
         let focusedWorkspaceID: UUID?
         let nextVirtualIndex: Int
-        let dynamicLayoutColumns: Int?
-        let layoutMode: WorkspaceLayoutMode
         let canvasCamera: CanvasCameraState?
+        let canvasSavepoints: [Int: CanvasCameraState]
     }
 
     private func buildBootstrapState() -> BootstrapState {
         guard let persisted = stateStore.load(),
-              persisted.version == 1,
+              persisted.version >= 1,
               !persisted.workspaces.isEmpty else {
             return BootstrapState(
                 workspaces: [],
                 focusedWorkspaceID: nil,
                 nextVirtualIndex: nextVirtualIndex,
-                dynamicLayoutColumns: nil,
-                layoutMode: .tile,
-                canvasCamera: nil
+                canvasCamera: nil,
+                canvasSavepoints: [:]
             )
         }
         let profile = displayManager.mainDisplayProfile()
 
         var restored: [Workspace] = []
+        var restoredSerialByWorkspaceID: [UUID: UInt32] = [:]
         restored.reserveCapacity(persisted.workspaces.count)
 
         for (index, entry) in persisted.workspaces.enumerated() {
@@ -1335,7 +1512,8 @@ final class WorkspaceRootViewController: NSViewController {
                 width: profile.width,
                 height: profile.height,
                 hidpi: profile.hiDPI,
-                physicalSizeMM: profile.physicalSizeMM
+                physicalSizeMM: profile.physicalSizeMM,
+                serialNumber: entry.displaySerial
             ) else {
                 continue
             }
@@ -1345,35 +1523,37 @@ final class WorkspaceRootViewController: NSViewController {
                 pixelSize: descriptor.pixelSize
             )
 
-            restored.append(
-                Workspace(
-                    id: UUID(),
-                    displayID: descriptor.displayID,
-                    title: descriptor.title,
-                    kind: .virtual,
-                    displayPixelSize: descriptor.pixelSize,
-                    tileSize: tileSize,
-                    canvasOrigin: restoredCanvasOrigin(from: entry)
-                )
+            let restoredWorkspace = Workspace(
+                id: UUID(),
+                displayID: descriptor.displayID,
+                title: descriptor.title,
+                kind: .virtual,
+                displayPixelSize: descriptor.pixelSize,
+                tileSize: tileSize,
+                canvasOrigin: restoredCanvasOrigin(from: entry)
             )
+            restored.append(restoredWorkspace)
+            if let serial = entry.displaySerial {
+                restoredSerialByWorkspaceID[restoredWorkspace.id] = serial
+            }
         }
 
         let focusedID: UUID?
-        if let idx = persisted.focusedIndex, idx >= 0, idx < restored.count {
+        if let focusedSerial = persisted.focusedDisplaySerial,
+           let matched = restored.first(where: { restoredSerialByWorkspaceID[$0.id] == focusedSerial }) {
+            focusedID = matched.id
+        } else if let idx = persisted.focusedIndex, idx >= 0, idx < restored.count {
             focusedID = restored[idx].id
         } else {
             focusedID = restored.first?.id
         }
 
-        let layoutMode = WorkspaceLayoutMode(rawValue: persisted.layoutModeRawValue ?? "") ?? .tile
-
         return BootstrapState(
             workspaces: restored,
             focusedWorkspaceID: focusedID,
             nextVirtualIndex: max(persisted.nextVirtualIndex, restored.count + 1),
-            dynamicLayoutColumns: persisted.dynamicLayoutColumns,
-            layoutMode: layoutMode,
-            canvasCamera: restoredCanvasCamera(from: persisted)
+            canvasCamera: restoredCanvasCamera(from: persisted),
+            canvasSavepoints: restoredCanvasSavepoints(from: persisted)
         )
     }
 
@@ -1411,55 +1591,28 @@ final class WorkspaceRootViewController: NSViewController {
         )
     }
 
-    func menuApplyLayoutFullWidth() {
-        applyLayout(columns: 1)
-    }
-
-    func menuApplyLayout2x2() {
-        applyLayout(columns: 2)
-    }
-
     func menuFullscreenSelected() {
         openFullscreenForFocusedWorkspace()
     }
 
-    func menuSetWorkspaceLayoutMode(_ mode: WorkspaceLayoutMode) {
-        guard mode != currentLayoutMode else { return }
-
-        if currentLayoutMode == .canvas {
-            lastCanvasCamera = currentCanvasCameraState() ?? lastCanvasCamera
-        }
-
-        if mode == .canvas {
-            let snapshot = snapshotCurrentGridOrigins()
-            workspaceStore.setCanvasOrigins(snapshot)
-        }
-
-        currentLayoutMode = mode
-        gridView.layoutMode = mode
-        renderStore()
-        applyInteractionMode()
-        if mode == .canvas {
-            DispatchQueue.main.async { [weak self] in
-                if let camera = self?.lastCanvasCamera {
-                    self?.applyCanvasCamera(camera)
-                } else {
-                    self?.centerCanvasViewport()
-                }
-            }
-        }
+    func menuResetCanvasZoom() {
+        let clipCenter = CGPoint(
+            x: scrollView.contentView.bounds.midX,
+            y: scrollView.contentView.bounds.midY
+        )
+        scrollView.setMagnification(1.0, centeredAt: clipCenter)
+        lastCanvasCamera = currentCanvasCameraState() ?? lastCanvasCamera
         scheduleStateSave()
-        scheduleArrangementSync()
     }
 
-    func menuSetTileSizingMode(_ mode: TileSizingMode) {
-        shortcutManager.updateTileSizingMode(mode)
-        if mode == .fixed {
-            applyFixedReasonableTileSizing()
-        } else {
-            lastDynamicLayoutViewportWidth = 0
-            refreshDynamicPresetLayoutForViewportIfNeeded()
-        }
+    func menuJumpToCanvasOrigin() {
+        let viewport = scrollView.contentView.bounds.size
+        guard viewport.width > 1, viewport.height > 1 else { return }
+        let target = gridView.canvasViewportOriginForWorldOrigin(viewportSize: viewport)
+        scrollView.contentView.scroll(to: target)
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        lastCanvasCamera = currentCanvasCameraState() ?? lastCanvasCamera
+        scheduleStateSave()
     }
 
     private func applyBootstrapState(_ bootstrap: BootstrapState) {
@@ -1469,11 +1622,11 @@ final class WorkspaceRootViewController: NSViewController {
         } else {
             workspaceStore.setWorkspaces(bootstrap.workspaces, focusedWorkspaceID: bootstrap.focusedWorkspaceID)
             nextVirtualIndex = bootstrap.nextVirtualIndex
-            activeDynamicLayoutColumns = bootstrap.dynamicLayoutColumns
         }
-        currentLayoutMode = bootstrap.layoutMode
+        currentLayoutMode = .canvas
         lastCanvasCamera = bootstrap.canvasCamera
-        gridView.layoutMode = currentLayoutMode
+        canvasSavepoints = bootstrap.canvasSavepoints
+        gridView.layoutMode = .canvas
         applyInteractionMode()
         workspaceStore.normalizeTileSizesForCurrentDisplays()
         isRestoringState = false
@@ -1484,38 +1637,22 @@ final class WorkspaceRootViewController: NSViewController {
             setTileStatus("Screen Recording permission required for live display previews.")
         }
         if !bootstrap.workspaces.isEmpty {
-            if shortcutManager.tileSizingMode == .dynamic, activeDynamicLayoutColumns != nil {
-                lastDynamicLayoutViewportWidth = 0
-                refreshDynamicPresetLayoutForViewportIfNeeded(force: true)
-            }
             view.layoutSubtreeIfNeeded()
             layoutGridDocumentView()
             view.layoutSubtreeIfNeeded()
             applyDisplayArrangementImmediatelyIfNeeded()
             scheduleStateSave()
         }
-        if currentLayoutMode == .canvas {
-            DispatchQueue.main.async { [weak self] in
-                if let camera = self?.lastCanvasCamera {
-                    self?.applyCanvasCamera(camera)
-                } else {
-                    self?.centerCanvasViewport()
-                }
+        DispatchQueue.main.async { [weak self] in
+            if let camera = self?.lastCanvasCamera {
+                self?.applyCanvasCamera(camera)
+            } else {
+                self?.centerCanvasViewport()
             }
         }
 
         setTileStatus(nil)
         signalInitialBootstrapCompleteIfNeeded()
-    }
-
-    private func snapshotCurrentGridOrigins() -> [UUID: CGPoint] {
-        var map: [UUID: CGPoint] = [:]
-        for workspace in workspaceStore.workspaces {
-            if let frame = gridView.frameForWorkspaceInGrid(workspace.id) {
-                map[workspace.id] = frame.origin
-            }
-        }
-        return map
     }
 
     private func setTileStatus(_ message: String?) {

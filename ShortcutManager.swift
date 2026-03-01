@@ -7,67 +7,61 @@ enum ShortcutAction: String, CaseIterable {
     case removeDisplay = "remove_display"
     case focusNext = "focus_next"
     case focusPrevious = "focus_previous"
-    case layoutFullWidth = "layout_full_width"
-    case layout2x2 = "layout_2x2"
     case fullscreenSelected = "fullscreen_selected"
 
     var title: String {
         switch self {
         case .toggleTeleport: return "Toggle Teleport"
         case .newDisplay: return "New Display"
-        case .removeDisplay: return "Remove Display"
+        case .removeDisplay: return "Close Display"
         case .focusNext: return "Focus Next"
         case .focusPrevious: return "Focus Previous"
-        case .layoutFullWidth: return "Layout Full Width"
-        case .layout2x2: return "Layout 2x2"
         case .fullscreenSelected: return "Fullscreen Selected"
         }
     }
 
     var defaultShortcut: String {
         switch self {
-        case .toggleTeleport: return "ctrl+alt+space"
+        case .toggleTeleport: return "double_cmd"
         case .newDisplay: return "cmd+n"
         case .removeDisplay: return "cmd+w"
-        case .focusNext: return "ctrl+alt+l"
-        case .focusPrevious: return "ctrl+alt+h"
-        case .layoutFullWidth: return "ctrl+alt+1"
-        case .layout2x2: return "ctrl+alt+2"
-        case .fullscreenSelected: return "ctrl+alt+f"
-        }
-    }
-
-    var options: [String] {
-        switch self {
-        case .toggleTeleport:
-            return ["ctrl+alt+space", "cmd+alt+space", "ctrl+alt+t"]
-        case .newDisplay:
-            return ["cmd+n", "ctrl+alt+n", "cmd+alt+n"]
-        case .removeDisplay:
-            return ["cmd+w", "ctrl+alt+backspace", "ctrl+alt+w"]
-        case .focusNext:
-            return ["ctrl+alt+l", "ctrl+alt+right", "cmd+alt+right"]
-        case .focusPrevious:
-            return ["ctrl+alt+h", "ctrl+alt+left", "cmd+alt+left"]
-        case .layoutFullWidth:
-            return ["ctrl+alt+1", "cmd+alt+1", "ctrl+alt+f"]
-        case .layout2x2:
-            return ["ctrl+alt+2", "cmd+alt+2", "ctrl+alt+g"]
-        case .fullscreenSelected:
-            return ["ctrl+alt+f", "cmd+shift+f", "ctrl+alt+enter"]
+        case .focusNext: return "ctrl+alt+right"
+        case .focusPrevious: return "ctrl+alt+left"
+        case .fullscreenSelected: return "cmd+shift+f"
         }
     }
 }
 
-enum TileSizingMode: String, CaseIterable {
-    case dynamic
-    case fixed
+enum ShortcutModifier: String, CaseIterable {
+    case control = "ctrl"
+    case option = "alt"
+    case command = "cmd"
+    case shift = "shift"
 
-    var title: String {
+    var displayName: String {
         switch self {
-        case .dynamic: return "Dynamic"
-        case .fixed: return "Fixed (Reasonable)"
+        case .control: return "Ctrl"
+        case .option: return "Alt"
+        case .command: return "Cmd"
+        case .shift: return "Shift"
         }
+    }
+
+    var flag: NSEvent.ModifierFlags {
+        switch self {
+        case .control: return .control
+        case .option: return .option
+        case .command: return .command
+        case .shift: return .shift
+        }
+    }
+
+    var doubleToken: String {
+        "double_\(rawValue)"
+    }
+
+    var doubleDisplay: String {
+        "\(displayName)+\(displayName)"
     }
 }
 
@@ -78,49 +72,175 @@ struct ShortcutKeyChord {
     let display: String
 }
 
+private struct ShortcutDoubleKeyChord {
+    let keyCode: UInt16
+    let modifiers: NSEvent.ModifierFlags
+    let canonical: String
+    let display: String
+}
+
+private enum ShortcutBinding {
+    case key(ShortcutKeyChord)
+    case doubleModifier(ShortcutModifier)
+    case doubleKey(ShortcutDoubleKeyChord)
+
+    var canonical: String {
+        switch self {
+        case .key(let chord):
+            return chord.canonical
+        case .doubleModifier(let modifier):
+            return modifier.doubleToken
+        case .doubleKey(let chord):
+            return chord.canonical
+        }
+    }
+
+    var display: String {
+        switch self {
+        case .key(let chord):
+            return chord.display
+        case .doubleModifier(let modifier):
+            return modifier.doubleDisplay
+        case .doubleKey(let chord):
+            return chord.display
+        }
+    }
+}
+
+private struct KeyTapIdentity: Hashable {
+    let keyCode: UInt16
+    let modifiersRawValue: UInt
+}
+
 final class ShortcutManager {
     private let store: ShortcutStore
     private var bindings: [ShortcutAction: String]
-    private var chords: [ShortcutAction: ShortcutKeyChord]
-    private(set) var tileSizingMode: TileSizingMode
+    private var compiled: [ShortcutAction: ShortcutBinding]
+    private var lastTapByModifier: [ShortcutModifier: TimeInterval] = [:]
+    private var lastTapByKey: [KeyTapIdentity: TimeInterval] = [:]
+    private let doubleTapInterval: TimeInterval = 0.45
 
     var onDidChange: (() -> Void)?
 
     init(bundleIdentifier: String) {
         store = ShortcutStore(bundleIdentifier: bundleIdentifier)
-        let loaded = store.load()
+        let loadedBindings = store.load()
+        if Self.shouldResetToDefaults(loadedBindings) {
+            let defaults = Self.defaultBindings()
+            bindings = defaults
+            compiled = Self.compile(bindings: defaults)
+            store.save(bindings: defaults)
+            return
+        }
+
         var resolved: [ShortcutAction: String] = [:]
         for action in ShortcutAction.allCases {
-            let loadedBinding = loaded.bindings[action]
-            let candidate = Self.migrateLegacyDefault(for: action, loadedBinding: loadedBinding) ?? loadedBinding ?? action.defaultShortcut
-            resolved[action] = candidate
+            let value = loadedBindings[action] ?? action.defaultShortcut
+            if let binding = Self.parse(bindingString: value) {
+                resolved[action] = binding.canonical
+            }
         }
         bindings = resolved
-        chords = ShortcutManager.compile(bindings: resolved)
-        tileSizingMode = loaded.tileSizingMode ?? .dynamic
-        store.save(bindings: bindings, tileSizingMode: tileSizingMode)
+        compiled = Self.compile(bindings: resolved)
     }
 
-    private static func migrateLegacyDefault(for action: ShortcutAction, loadedBinding: String?) -> String? {
-        guard let loadedBinding else { return nil }
-        switch action {
-        case .newDisplay where loadedBinding == "ctrl+alt+n":
-            return action.defaultShortcut
-        case .removeDisplay where loadedBinding == "ctrl+alt+backspace":
-            return action.defaultShortcut
-        default:
-            return nil
+    private static func shouldResetToDefaults(_ loaded: [ShortcutAction: String]) -> Bool {
+        guard loaded.count == ShortcutAction.allCases.count else { return true }
+
+        let legacyTeleportBindings: Set<String> = [
+            "ctrl+alt+space",
+            "cmd+alt+space",
+            "ctrl+alt+t",
+        ]
+
+        for action in ShortcutAction.allCases {
+            guard let raw = loaded[action] else { return true }
+            let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !normalized.isEmpty else { return true }
+            guard Self.parse(bindingString: normalized) != nil else { return true }
+
+            if action == .toggleTeleport, legacyTeleportBindings.contains(normalized) {
+                return true
+            }
         }
+        return false
+    }
+
+    private static func defaultBindings() -> [ShortcutAction: String] {
+        var map: [ShortcutAction: String] = [:]
+        for action in ShortcutAction.allCases {
+            map[action] = action.defaultShortcut
+        }
+        return map
     }
 
     func action(for event: NSEvent) -> ShortcutAction? {
-        guard event.type == .keyDown, !event.isARepeat else { return nil }
-        let eventMods = ShortcutManager.normalizeModifiers(event.modifierFlags)
-        for action in ShortcutAction.allCases {
-            guard let chord = chords[action] else { continue }
-            if chord.keyCode == event.keyCode && chord.modifiers == eventMods {
-                return action
+        switch event.type {
+        case .keyDown:
+            guard !event.isARepeat else { return nil }
+            let modifiers = Self.normalizeModifiers(event.modifierFlags)
+            var matchingDoubleKey: ShortcutDoubleKeyChord?
+            for action in ShortcutAction.allCases {
+                guard let binding = compiled[action] else { continue }
+                switch binding {
+                case .key(let chord):
+                    if chord.keyCode == event.keyCode && chord.modifiers == modifiers {
+                        return action
+                    }
+                case .doubleKey(let chord):
+                    if chord.keyCode == event.keyCode && chord.modifiers == modifiers {
+                        matchingDoubleKey = chord
+                    }
+                case .doubleModifier:
+                    continue
+                }
             }
+            if let chord = matchingDoubleKey {
+                let tapID = KeyTapIdentity(keyCode: chord.keyCode, modifiersRawValue: chord.modifiers.rawValue)
+                let now = event.timestamp
+                if let last = lastTapByKey[tapID], last > 0, now - last <= doubleTapInterval {
+                    lastTapByKey[tapID] = 0
+                    for action in ShortcutAction.allCases {
+                        guard let binding = compiled[action] else { continue }
+                        if case .doubleKey(let expected) = binding,
+                           expected.keyCode == chord.keyCode,
+                           expected.modifiers == chord.modifiers {
+                            return action
+                        }
+                    }
+                } else {
+                    lastTapByKey[tapID] = now
+                }
+            }
+        case .flagsChanged:
+            guard let modifier = Self.modifierFromFlagsChanged(event) else { return nil }
+            let isDown = CGEventSource.keyState(.combinedSessionState, key: event.keyCode)
+            guard isDown else {
+                // Ignore key-up transition; double-tap timing is based on key-down edges.
+                return nil
+            }
+            let modifiers = Self.normalizeModifiers(event.modifierFlags)
+            guard modifiers == modifier.flag else {
+                lastTapByModifier[modifier] = 0
+                return nil
+            }
+
+            let now = event.timestamp
+            if let last = lastTapByModifier[modifier],
+               last > 0,
+               now - last <= doubleTapInterval {
+                lastTapByModifier[modifier] = 0
+                for action in ShortcutAction.allCases {
+                    guard let binding = compiled[action] else { continue }
+                    if case .doubleModifier(let expected) = binding, expected == modifier {
+                        return action
+                    }
+                }
+            } else {
+                lastTapByModifier[modifier] = now
+            }
+        default:
+            return nil
         }
         return nil
     }
@@ -130,29 +250,20 @@ final class ShortcutManager {
     }
 
     func displayLabel(for action: ShortcutAction) -> String {
-        if let chord = chords[action] {
-            return chord.display
-        }
-        return ShortcutManager.displayLabel(forShortcutString: action.defaultShortcut)
+        compiled[action]?.display ?? Self.displayLabel(forShortcutString: action.defaultShortcut)
     }
 
     func updateBindings(_ updates: [ShortcutAction: String]) {
         var next = bindings
         for action in ShortcutAction.allCases {
-            if let value = updates[action] {
-                next[action] = value
+            guard let raw = updates[action], let parsed = Self.parse(bindingString: raw) else {
+                continue
             }
+            next[action] = parsed.canonical
         }
         bindings = next
-        chords = ShortcutManager.compile(bindings: next)
-        store.save(bindings: bindings, tileSizingMode: tileSizingMode)
-        onDidChange?()
-    }
-
-    func updateTileSizingMode(_ mode: TileSizingMode) {
-        guard tileSizingMode != mode else { return }
-        tileSizingMode = mode
-        store.save(bindings: bindings, tileSizingMode: tileSizingMode)
+        compiled = Self.compile(bindings: next)
+        store.save(bindings: bindings)
         onDidChange?()
     }
 
@@ -161,26 +272,76 @@ final class ShortcutManager {
     }
 
     static func displayLabel(forShortcutString shortcut: String) -> String {
-        guard let parsed = parse(shortcut: shortcut) else { return shortcut }
-        return parsed.display
+        guard let binding = parse(bindingString: shortcut) else { return shortcut }
+        return binding.display
     }
 
-    private static func compile(bindings: [ShortcutAction: String]) -> [ShortcutAction: ShortcutKeyChord] {
-        var map: [ShortcutAction: ShortcutKeyChord] = [:]
+    static func shortcutString(forKeyDownEvent event: NSEvent) -> String? {
+        guard event.type == .keyDown else { return nil }
+        guard let keyToken = keyToken(for: event.keyCode) else { return nil }
+        let modifiers = normalizeModifiers(event.modifierFlags)
+        return canonicalString(modifiers: modifiers, key: keyToken)
+    }
+
+    static func displayLabel(forKeyDownEvent event: NSEvent) -> String? {
+        guard event.type == .keyDown else { return nil }
+        guard let keyDisplay = keyDisplayName(for: event.keyCode) else { return nil }
+        let modifiers = normalizeModifiers(event.modifierFlags)
+        return displayString(modifiers: modifiers, key: keyDisplay)
+    }
+
+    static func captureDoubleModifier(
+        from event: NSEvent,
+        state: inout [ShortcutModifier: TimeInterval],
+        interval: TimeInterval = 0.45
+    ) -> String? {
+        guard event.type == .flagsChanged else { return nil }
+        guard let modifier = modifierFromFlagsChanged(event) else { return nil }
+        let isDown = CGEventSource.keyState(.combinedSessionState, key: event.keyCode)
+        guard isDown else {
+            // Ignore key-up transition; double-tap timing is based on key-down edges.
+            return nil
+        }
+        let modifiers = normalizeModifiers(event.modifierFlags)
+        guard modifiers == modifier.flag else {
+            state[modifier] = 0
+            return nil
+        }
+
+        let now = event.timestamp
+        if let last = state[modifier], last > 0, now - last <= interval {
+            state[modifier] = 0
+            return modifier.doubleToken
+        }
+
+        state[modifier] = now
+        return nil
+    }
+
+    private static func compile(bindings: [ShortcutAction: String]) -> [ShortcutAction: ShortcutBinding] {
+        var map: [ShortcutAction: ShortcutBinding] = [:]
         for action in ShortcutAction.allCases {
             let source = bindings[action] ?? action.defaultShortcut
-            if let chord = parse(shortcut: source) {
-                map[action] = chord
-            } else if let fallback = parse(shortcut: action.defaultShortcut) {
+            if let parsed = parse(bindingString: source) {
+                map[action] = parsed
+            } else if let fallback = parse(bindingString: action.defaultShortcut) {
                 map[action] = fallback
             }
         }
         return map
     }
 
-    private static func parse(shortcut: String) -> ShortcutKeyChord? {
-        let parts = shortcut
+    private static func parse(bindingString: String) -> ShortcutBinding? {
+        let text = bindingString
+            .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
+        guard !text.isEmpty else { return nil }
+
+        if let specialBinding = parseSpecialDoubleBinding(text) {
+            return specialBinding
+        }
+
+        let parts = text
             .split(separator: "+")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -190,34 +351,89 @@ final class ShortcutManager {
         var keyToken: String?
 
         for part in parts {
-            switch part {
-            case "ctrl", "control":
-                modifiers.insert(.control)
-            case "alt", "option":
-                modifiers.insert(.option)
-            case "cmd", "command":
-                modifiers.insert(.command)
-            case "shift":
-                modifiers.insert(.shift)
-            default:
-                if keyToken != nil {
-                    return nil
-                }
-                keyToken = part
+            if let modifier = modifierTokenMap[part] {
+                modifiers.insert(modifier.flag)
+                continue
             }
+            if keyToken != nil {
+                return nil
+            }
+            keyToken = part
         }
 
-        guard let keyToken, let key = keyCode(for: keyToken) else { return nil }
-        let normalizedMods = normalizeModifiers(modifiers)
-        let canonical = canonicalString(modifiers: normalizedMods, key: key.canonicalName)
-        let display = displayString(modifiers: normalizedMods, key: key.displayName)
+        guard let keyToken,
+              let normalizedKeyToken = normalizedKeyToken(for: keyToken),
+              let keyCode = keyCode(for: normalizedKeyToken),
+              let keyDisplay = keyDisplayForToken(normalizedKeyToken) else {
+            return nil
+        }
 
-        return ShortcutKeyChord(
-            keyCode: key.keyCode,
-            modifiers: normalizedMods,
-            canonical: canonical,
-            display: display
+        let normalizedMods = normalizeModifiers(modifiers)
+        let canonical = canonicalString(modifiers: normalizedMods, key: normalizedKeyToken)
+        let display = displayString(modifiers: normalizedMods, key: keyDisplay)
+
+        return .key(ShortcutKeyChord(keyCode: keyCode, modifiers: normalizedMods, canonical: canonical, display: display))
+    }
+
+    private static func parseSpecialDoubleBinding(_ text: String) -> ShortcutBinding? {
+        if text.hasPrefix("double_") {
+            let suffix = String(text.dropFirst("double_".count))
+            if let modifier = modifierTokenMap[suffix] {
+                return .doubleModifier(modifier)
+            }
+            if let keyToken = normalizedKeyToken(for: suffix),
+               let keyCode = keyCode(for: keyToken),
+               let display = keyDisplayForToken(keyToken) {
+                return .doubleKey(
+                    ShortcutDoubleKeyChord(
+                        keyCode: keyCode,
+                        modifiers: [],
+                        canonical: "double_\(keyToken)",
+                        display: "\(display)+\(display)"
+                    )
+                )
+            }
+            return nil
+        }
+
+        let parts = text
+            .split(separator: "+")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard parts.count == 2, parts[0] == parts[1] else { return nil }
+
+        let token = parts[0]
+        if let modifier = modifierTokenMap[token] {
+            return .doubleModifier(modifier)
+        }
+
+        guard let keyToken = normalizedKeyToken(for: token),
+              let keyCode = keyCode(for: keyToken),
+              let display = keyDisplayForToken(keyToken) else {
+            return nil
+        }
+        return .doubleKey(
+            ShortcutDoubleKeyChord(
+                keyCode: keyCode,
+                modifiers: [],
+                canonical: "double_\(keyToken)",
+                display: "\(display)+\(display)"
+            )
         )
+    }
+
+    private static func modifierFromFlagsChanged(_ event: NSEvent) -> ShortcutModifier? {
+        switch event.keyCode {
+        case 55, 54:
+            return .command
+        case 56, 60:
+            return .shift
+        case 58, 61:
+            return .option
+        case 59, 62:
+            return .control
+        default:
+            return nil
+        }
     }
 
     private static func normalizeModifiers(_ modifiers: NSEvent.ModifierFlags) -> NSEvent.ModifierFlags {
@@ -244,40 +460,82 @@ final class ShortcutManager {
         return tokens.joined(separator: "+")
     }
 
-    private static func keyCode(for token: String) -> (keyCode: UInt16, canonicalName: String, displayName: String)? {
-        if let mapped = keyMap[token] {
-            return mapped
+    private static func normalizedKeyToken(for token: String) -> String? {
+        if keyTokenToCode[token] != nil {
+            return token
         }
-        if token.count == 1, let mapped = keyMap[token] {
-            return mapped
-        }
-        return nil
+        return keyAliases[token]
     }
 
-    private static let keyMap: [String: (UInt16, String, String)] = [
-        "space": (49, "space", "Space"),
-        "enter": (36, "enter", "Enter"),
-        "return": (36, "enter", "Enter"),
-        "tab": (48, "tab", "Tab"),
-        "esc": (53, "esc", "Esc"),
-        "escape": (53, "esc", "Esc"),
-        "backspace": (51, "backspace", "Backspace"),
-        "delete": (51, "backspace", "Backspace"),
-        "left": (123, "left", "Left"),
-        "right": (124, "right", "Right"),
-        "down": (125, "down", "Down"),
-        "up": (126, "up", "Up"),
-        "h": (4, "h", "H"),
-        "j": (38, "j", "J"),
-        "k": (40, "k", "K"),
-        "l": (37, "l", "L"),
-        "n": (45, "n", "N"),
-        "w": (13, "w", "W"),
-        "t": (17, "t", "T"),
-        "f": (3, "f", "F"),
-        "g": (5, "g", "G"),
-        "1": (18, "1", "1"),
-        "2": (19, "2", "2"),
+    private static func keyCode(for token: String) -> UInt16? {
+        keyTokenToCode[token]
+    }
+
+    private static func keyToken(for keyCode: UInt16) -> String? {
+        keyCodeToToken[keyCode]
+    }
+
+    private static func keyDisplayName(for keyCode: UInt16) -> String? {
+        guard let token = keyCodeToToken[keyCode] else { return nil }
+        return keyDisplayForToken(token)
+    }
+
+    private static func keyDisplayForToken(_ token: String) -> String? {
+        if let mapped = keyTokenDisplay[token] {
+            return mapped
+        }
+        if token.count == 1 {
+            return token.uppercased()
+        }
+        return token.capitalized
+    }
+
+    private static let modifierTokenMap: [String: ShortcutModifier] = [
+        "ctrl": .control,
+        "control": .control,
+        "alt": .option,
+        "option": .option,
+        "cmd": .command,
+        "command": .command,
+        "shift": .shift,
+    ]
+
+    // ANSI key codes used by our binding parser and recorder.
+    private static let keyTokenToCode: [String: UInt16] = [
+        "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7,
+        "c": 8, "v": 9, "b": 11, "q": 12, "w": 13, "e": 14, "r": 15, "y": 16,
+        "t": 17, "1": 18, "2": 19, "3": 20, "4": 21, "6": 22, "5": 23, "=": 24,
+        "9": 25, "7": 26, "-": 27, "8": 28, "0": 29, "]": 30, "o": 31, "u": 32,
+        "[": 33, "i": 34, "p": 35, "enter": 36, "l": 37, "j": 38, "'": 39, "k": 40,
+        ";": 41, "\\": 42, ",": 43, "/": 44, "n": 45, "m": 46, ".": 47, "tab": 48,
+        "space": 49, "`": 50, "backspace": 51, "esc": 53, "left": 123, "right": 124,
+        "down": 125, "up": 126,
+    ]
+
+    private static let keyAliases: [String: String] = [
+        "delete": "backspace",
+        "escape": "esc",
+        "return": "enter",
+    ]
+
+    private static let keyCodeToToken: [UInt16: String] = {
+        var map: [UInt16: String] = [:]
+        for (token, code) in keyTokenToCode {
+            map[code] = token
+        }
+        return map
+    }()
+
+    private static let keyTokenDisplay: [String: String] = [
+        "enter": "Enter",
+        "tab": "Tab",
+        "space": "Space",
+        "backspace": "Backspace",
+        "esc": "Esc",
+        "left": "Left",
+        "right": "Right",
+        "up": "Up",
+        "down": "Down",
     ]
 }
 
@@ -297,14 +555,13 @@ private final class ShortcutStore {
         fileURL.path
     }
 
-    func load() -> (bindings: [ShortcutAction: String], tileSizingMode: TileSizingMode?) {
+    func load() -> [ShortcutAction: String] {
         guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else {
-            return ([:], nil)
+            return [:]
         }
 
         var currentSection = ""
         var map: [ShortcutAction: String] = [:]
-        var tileSizingMode: TileSizingMode?
 
         for rawLine in content.components(separatedBy: .newlines) {
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -316,25 +573,25 @@ private final class ShortcutStore {
                 continue
             }
 
-            guard let eq = line.firstIndex(of: "=") else { continue }
+            guard currentSection == "[shortcuts]",
+                  let eq = line.firstIndex(of: "=") else {
+                continue
+            }
+
             let key = line[..<eq].trimmingCharacters(in: .whitespacesAndNewlines)
             var value = line[line.index(after: eq)...].trimmingCharacters(in: .whitespacesAndNewlines)
             if value.hasPrefix("\""), value.hasSuffix("\""), value.count >= 2 {
                 value.removeFirst()
                 value.removeLast()
             }
-            if currentSection == "[shortcuts]" {
-                guard let action = ShortcutAction(rawValue: key) else { continue }
-                map[action] = value
-            } else if currentSection == "[layout]", key == "tile_sizing_mode" {
-                tileSizingMode = TileSizingMode(rawValue: value)
-            }
+            guard let action = ShortcutAction(rawValue: key) else { continue }
+            map[action] = value
         }
 
-        return (map, tileSizingMode)
+        return map
     }
 
-    func save(bindings: [ShortcutAction: String], tileSizingMode: TileSizingMode) {
+    func save(bindings: [ShortcutAction: String]) {
         queue.async {
             var lines: [String] = []
             lines.append("# Workspace Grid shortcuts")
@@ -343,9 +600,6 @@ private final class ShortcutStore {
                 let value = bindings[action] ?? action.defaultShortcut
                 lines.append("\(action.rawValue) = \"\(value)\"")
             }
-            lines.append("")
-            lines.append("[layout]")
-            lines.append("tile_sizing_mode = \"\(tileSizingMode.rawValue)\"")
             lines.append("")
             let content = lines.joined(separator: "\n")
 
