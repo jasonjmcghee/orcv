@@ -3,7 +3,7 @@ import CoreGraphics
 import Foundation
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
-    private static let mainWindowAutosaveName = "WorkspaceGridMainWindowFrame"
+    private static let mainWindowAutosaveName = "orcvMainWindowFrame"
 
     private var window: NSWindow?
     private var rootViewController: WorkspaceRootViewController?
@@ -22,7 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let displayManager = VirtualDisplayManager()
         let workspaceStore = WorkspaceStore()
         let pointerRouter = PointerRouter()
-        let bundleID = Bundle.main.bundleIdentifier ?? "com.pointworks.workspacegrid"
+        let bundleID = Bundle.main.bundleIdentifier ?? "today.jason.orcv"
         let shortcutManager = ShortcutManager(bundleIdentifier: bundleID)
         let stateStore = WorkspaceStateStore(bundleIdentifier: bundleID)
         self.shortcutManager = shortcutManager
@@ -43,7 +43,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             defer: false
         )
 
-        window.title = "Workspace Grid"
+        window.title = "orcv"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .none
@@ -96,7 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let appMenu = NSMenu()
         let aboutItem = NSMenuItem(
-            title: "About Workspace Grid",
+            title: "About orcv",
             action: #selector(showAboutPanel(_:)),
             keyEquivalent: ""
         )
@@ -113,7 +113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         appMenu.addItem(shortcutsItem)
         appMenu.addItem(.separator())
 
-        let appName = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "Workspace Grid"
+        let appName = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "orcv"
         appMenu.addItem(
             withTitle: "Quit \(appName)",
             action: #selector(NSApplication.terminate(_:)),
@@ -225,7 +225,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func showAboutPanel(_ sender: Any?) {
         _ = sender
         let options: [NSApplication.AboutPanelOptionKey: Any] = [
-            .applicationName: "Workspace Grid",
+            .applicationName: "orcv",
             .version: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0",
             .credits: NSAttributedString(string: "Controls:\n• Drag displays to position them on canvas\n• Drag empty background to move the app window\n• Hold Space while hovering/focused to move window with cursor\n• Use Shortcuts settings to record key bindings"),
         ]

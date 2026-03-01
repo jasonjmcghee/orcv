@@ -34,9 +34,9 @@ final class DisplayStreamManager {
     private var latestSurfaces: [CGDirectDisplayID: IOSurface] = [:]
     private var targetDescriptors: [CGDirectDisplayID: DisplayDescriptor] = [:]
 
-    private let controlQueue = DispatchQueue(label: "com.pointworks.workspacegrid.stream-control")
-    private let callbackQueue = DispatchQueue(label: "com.pointworks.workspacegrid.stream-callback", qos: .userInteractive)
-    private let surfaceQueue = DispatchQueue(label: "com.pointworks.workspacegrid.surface-store", attributes: .concurrent)
+    private let controlQueue = DispatchQueue(label: "today.jason.orcv.stream-control")
+    private let callbackQueue = DispatchQueue(label: "today.jason.orcv.stream-callback", qos: .userInteractive)
+    private let surfaceQueue = DispatchQueue(label: "today.jason.orcv.surface-store", attributes: .concurrent)
 
     var onFrame: (() -> Void)?
     var onDisplayFrame: ((CGDirectDisplayID, IOSurface) -> Void)?

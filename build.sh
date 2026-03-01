@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="$ROOT_DIR/build"
-APP_NAME="WorkspaceGrid"
+APP_NAME="orcv"
 APP_DIR="$BUILD_DIR/$APP_NAME.app"
 BIN_DIR="$APP_DIR/Contents/MacOS"
 RES_DIR="$APP_DIR/Contents/Resources"
@@ -28,7 +28,7 @@ mkdir -p "$BIN_DIR" "$RES_DIR"
 
 swiftc \
   -O \
-  -import-objc-header "$ROOT_DIR/WorkspaceGrid-Bridging-Header.h" \
+  -import-objc-header "$ROOT_DIR/orcv-Bridging-Header.h" \
   -framework Foundation \
   -framework AppKit \
   -framework CoreGraphics \
@@ -52,14 +52,14 @@ swiftc \
   "$ROOT_DIR/PointerRouter.swift" \
   "$ROOT_DIR/InputMacroEngine.swift" \
   "$ROOT_DIR/WorkspacePreviewWindowController.swift" \
-  "$ROOT_DIR/WorkspaceGridView.swift" \
+  "$ROOT_DIR/OrcvGridView.swift" \
   "$ROOT_DIR/WorkspaceRootViewController.swift"
 
 cp "$ROOT_DIR/Info.plist" "$APP_DIR/Contents/Info.plist"
-cp "$ROOT_DIR/WorkspaceGrid.entitlements" "$RES_DIR/WorkspaceGrid.entitlements"
+cp "$ROOT_DIR/orcv.entitlements" "$RES_DIR/orcv.entitlements"
 
 codesign --force --deep --sign "$SIGNING_IDENTITY" \
-  --entitlements "$ROOT_DIR/WorkspaceGrid.entitlements" \
+  --entitlements "$ROOT_DIR/orcv.entitlements" \
   "$APP_DIR"
 
 codesign --verify --verbose "$APP_DIR"

@@ -3,17 +3,6 @@ import CoreGraphics
 import Foundation
 import IOSurface
 
-private final class CanvasZoomScrollView: NSScrollView {
-    var commandScrollHandler: ((NSEvent) -> Bool)?
-
-    override func scrollWheel(with event: NSEvent) {
-        if commandScrollHandler?(event) == true {
-            return
-        }
-        super.scrollWheel(with: event)
-    }
-}
-
 final class WorkspaceRootViewController: NSViewController {
     private struct CanvasCameraState {
         let magnification: CGFloat
@@ -34,8 +23,7 @@ final class WorkspaceRootViewController: NSViewController {
         self?.surface(for: reference)
     })
 
-    private let scrollView = CanvasZoomScrollView(frame: .zero)
-    private let gridView = WorkspaceGridView(frame: .zero)
+    private let gridView = OrcvGridView(frame: .zero)
     private let canvasBackdropView = NSVisualEffectView(frame: .zero)
     private let tileStatusOverlay = NSVisualEffectView(frame: .zero)
     private let tileStatusLabel = NSTextField(labelWithString: "")
@@ -45,10 +33,10 @@ final class WorkspaceRootViewController: NSViewController {
     private var nextVirtualIndex: Int = 1
     private var localSwipeMonitor: Any?
     private var globalSwipeMonitor: Any?
+    private var localCanvasScrollMonitor: Any?
+    private var globalCanvasScrollMonitor: Any?
     private var localMagnifyMonitor: Any?
     private var globalMagnifyMonitor: Any?
-    private var globalCommandScrollZoomMonitor: Any?
-    private var canvasBoundsObserver: NSObjectProtocol?
     private var canvasCameraSaveDebounceWorkItem: DispatchWorkItem?
     private var windowLevelPollingTimer: Timer?
     private var spaceFollowWindowTimer: Timer?
@@ -59,7 +47,7 @@ final class WorkspaceRootViewController: NSViewController {
     private var immersiveTeleportWorkItem: DispatchWorkItem?
     private var arrangementDebounceWorkItem: DispatchWorkItem?
     private let arrangementDebounceInterval: TimeInterval = 1.0
-    private let arrangementApplyQueue = DispatchQueue(label: "com.pointworks.workspacegrid.arrangement-apply", qos: .utility)
+    private let arrangementApplyQueue = DispatchQueue(label: "today.jason.orcv.arrangement-apply", qos: .utility)
     private var lastAppliedOrigins: [CGDirectDisplayID: CGPoint] = [:]
     private var lastAppliedArrangementSignature: UInt64?
     private var lastQueuedArrangementSignature: UInt64?
@@ -73,8 +61,10 @@ final class WorkspaceRootViewController: NSViewController {
     private var isTileResizeInProgress = false
     private var pendingStateSaveAfterResize = false
     private var resizeUndoBaseline: [UUID: CGSize]?
-    private let lifecycleQueue = DispatchQueue(label: "com.pointworks.workspacegrid.lifecycle", qos: .userInitiated)
+    private let lifecycleQueue = DispatchQueue(label: "today.jason.orcv.lifecycle", qos: .userInitiated)
     private var didSignalInitialBootstrapComplete = false
+    private let minCanvasMagnification: CGFloat = 0.05
+    private let maxCanvasMagnification: CGFloat = 8.0
 
     var onMacroStateDidChange: (() -> Void)?
     var onInitialBootstrapComplete: (() -> Void)?
@@ -107,17 +97,17 @@ final class WorkspaceRootViewController: NSViewController {
         if let globalSwipeMonitor {
             NSEvent.removeMonitor(globalSwipeMonitor)
         }
+        if let localCanvasScrollMonitor {
+            NSEvent.removeMonitor(localCanvasScrollMonitor)
+        }
+        if let globalCanvasScrollMonitor {
+            NSEvent.removeMonitor(globalCanvasScrollMonitor)
+        }
         if let localMagnifyMonitor {
             NSEvent.removeMonitor(localMagnifyMonitor)
         }
         if let globalMagnifyMonitor {
             NSEvent.removeMonitor(globalMagnifyMonitor)
-        }
-        if let globalCommandScrollZoomMonitor {
-            NSEvent.removeMonitor(globalCommandScrollZoomMonitor)
-        }
-        if let canvasBoundsObserver {
-            NotificationCenter.default.removeObserver(canvasBoundsObserver)
         }
         canvasCameraSaveDebounceWorkItem?.cancel()
         immersiveTeleportWorkItem?.cancel()
@@ -163,22 +153,8 @@ final class WorkspaceRootViewController: NSViewController {
         canvasBackdropView.blendingMode = .behindWindow
         canvasBackdropView.state = .active
 
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.drawsBackground = false
-        scrollView.hasVerticalScroller = true
-        scrollView.hasHorizontalScroller = false
-        scrollView.autohidesScrollers = true
-        scrollView.borderType = .noBorder
-        scrollView.contentView.postsBoundsChangedNotifications = true
-        scrollView.allowsMagnification = false
-        scrollView.minMagnification = 1.0
-        scrollView.maxMagnification = 1.0
-        scrollView.commandScrollHandler = { [weak self] event in
-            self?.handleCanvasCommandScrollZoom(event, requireUnfocusedWindow: false) == true
-        }
-
+        gridView.translatesAutoresizingMaskIntoConstraints = false
         gridView.frame = NSRect(x: 0, y: 0, width: 1200, height: 720)
-        scrollView.documentView = gridView
 
         tileStatusOverlay.translatesAutoresizingMaskIntoConstraints = false
         tileStatusOverlay.material = .underWindowBackground
@@ -196,7 +172,7 @@ final class WorkspaceRootViewController: NSViewController {
         tileStatusOverlay.addSubview(tileStatusLabel)
 
         view.addSubview(canvasBackdropView)
-        view.addSubview(scrollView)
+        view.addSubview(gridView)
         view.addSubview(tileStatusOverlay)
 
         NSLayoutConstraint.activate([
@@ -205,15 +181,15 @@ final class WorkspaceRootViewController: NSViewController {
             canvasBackdropView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             canvasBackdropView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
-            scrollView.topAnchor.constraint(equalTo: view.topAnchor),
-            scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            gridView.topAnchor.constraint(equalTo: view.topAnchor),
+            gridView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            gridView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            gridView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
-            tileStatusOverlay.topAnchor.constraint(equalTo: scrollView.topAnchor),
-            tileStatusOverlay.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
-            tileStatusOverlay.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
-            tileStatusOverlay.bottomAnchor.constraint(equalTo: scrollView.bottomAnchor),
+            tileStatusOverlay.topAnchor.constraint(equalTo: gridView.topAnchor),
+            tileStatusOverlay.leadingAnchor.constraint(equalTo: gridView.leadingAnchor),
+            tileStatusOverlay.trailingAnchor.constraint(equalTo: gridView.trailingAnchor),
+            tileStatusOverlay.bottomAnchor.constraint(equalTo: gridView.bottomAnchor),
 
             tileStatusLabel.centerXAnchor.constraint(equalTo: tileStatusOverlay.centerXAnchor),
             tileStatusLabel.centerYAnchor.constraint(equalTo: tileStatusOverlay.centerYAnchor),
@@ -255,7 +231,7 @@ final class WorkspaceRootViewController: NSViewController {
         }
         gridView.onBackgroundWindowDragRequest = { [weak self] event in
             guard let self, let window = self.view.window else { return }
-            if !self.isWorkspaceGridWindowFocused() {
+            if !self.isOrcvWindowFocused() {
                 NSApp.activate(ignoringOtherApps: true)
             }
             window.performDrag(with: event)
@@ -338,8 +314,7 @@ final class WorkspaceRootViewController: NSViewController {
 
         installSwipeMonitorsIfNeeded()
         installMagnificationMonitorIfNeeded()
-        installCommandScrollZoomMonitorIfNeeded()
-        installCanvasCameraPersistenceObserverIfNeeded()
+        installCanvasScrollMonitorsIfNeeded()
         updateMacroControls()
     }
 
@@ -594,7 +569,7 @@ final class WorkspaceRootViewController: NSViewController {
         if localMagnifyMonitor == nil {
             localMagnifyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.magnify]) { [weak self] event in
                 guard let self else { return event }
-                let consumed = self.handleCanvasMagnify(event, requireUnfocusedWindow: true)
+                let consumed = self.handleCanvasMagnify(event, requireUnfocusedWindow: false)
                 return consumed ? nil : event
             }
         }
@@ -606,11 +581,27 @@ final class WorkspaceRootViewController: NSViewController {
         }
     }
 
+    private func installCanvasScrollMonitorsIfNeeded() {
+        if localCanvasScrollMonitor == nil {
+            localCanvasScrollMonitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel]) { [weak self] event in
+                guard let self else { return event }
+                let consumed = self.handleCanvasScrollEvent(event, requireUnfocusedWindow: false)
+                return consumed ? nil : event
+            }
+        }
+        guard globalCanvasScrollMonitor == nil else { return }
+        globalCanvasScrollMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.scrollWheel]) { [weak self] event in
+            DispatchQueue.main.async {
+                _ = self?.handleCanvasScrollEvent(event, requireUnfocusedWindow: true)
+            }
+        }
+    }
+
     @discardableResult
     private func handleCanvasMagnify(_ event: NSEvent, requireUnfocusedWindow: Bool) -> Bool {
         guard currentLayoutMode == .canvas else { return false }
         guard let window = view.window, window.isVisible else { return false }
-        if requireUnfocusedWindow, isWorkspaceGridWindowFocused() {
+        if requireUnfocusedWindow, isOrcvWindowFocused() {
             return false
         }
 
@@ -619,48 +610,40 @@ final class WorkspaceRootViewController: NSViewController {
 
         let mouseInScreen = NSEvent.mouseLocation
         let mouseInWindow = window.convertPoint(fromScreen: mouseInScreen)
-        let mouseInScrollView = scrollView.convert(mouseInWindow, from: nil)
-        guard scrollView.bounds.contains(mouseInScrollView) else { return false }
-        return applyCanvasZoom(magnificationDelta: delta, anchorWindowPoint: mouseInWindow)
-    }
-
-    private func installCommandScrollZoomMonitorIfNeeded() {
-        guard globalCommandScrollZoomMonitor == nil else { return }
-        globalCommandScrollZoomMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.scrollWheel]) { [weak self] event in
-            DispatchQueue.main.async {
-                _ = self?.handleCanvasCommandScrollZoom(event, requireUnfocusedWindow: true)
-            }
-        }
+        let mouseInGrid = gridView.convert(mouseInWindow, from: nil)
+        guard gridView.bounds.contains(mouseInGrid) else { return false }
+        return applyCanvasZoom(magnificationDelta: delta, anchorViewPoint: mouseInGrid)
     }
 
     @discardableResult
-    private func handleCanvasCommandScrollZoom(_ event: NSEvent, requireUnfocusedWindow: Bool) -> Bool {
+    private func handleCanvasScrollEvent(_ event: NSEvent, requireUnfocusedWindow: Bool) -> Bool {
         guard currentLayoutMode == .canvas else { return false }
         guard let window = view.window, window.isVisible else { return false }
-        if requireUnfocusedWindow, isWorkspaceGridWindowFocused() {
+        if requireUnfocusedWindow, isOrcvWindowFocused() {
             return false
         }
 
-        guard isZoomModifierActive(for: event) else { return false }
-
         let mouseInScreen = NSEvent.mouseLocation
         let mouseInWindow = window.convertPoint(fromScreen: mouseInScreen)
-        let mouseInScrollView = scrollView.convert(mouseInWindow, from: nil)
-        guard scrollView.bounds.contains(mouseInScrollView) else { return false }
+        let mouseInGrid = gridView.convert(mouseInWindow, from: nil)
+        guard gridView.bounds.contains(mouseInGrid) else { return false }
 
-        // Use whichever axis is dominant so Shift+wheel and horizontal wheels still zoom.
         let rawDeltaX = event.scrollingDeltaX
         let rawDeltaY = event.scrollingDeltaY
-        let rawDelta = abs(rawDeltaY) >= abs(rawDeltaX) ? rawDeltaY : rawDeltaX
-        guard rawDelta.isFinite else { return false }
+        guard rawDeltaX.isFinite, rawDeltaY.isFinite else { return false }
 
-        let normalizedDelta = event.hasPreciseScrollingDeltas ? rawDelta : rawDelta * 10.0
-        guard abs(normalizedDelta) > 0.001 else { return false }
+        let normalizedX = event.hasPreciseScrollingDeltas ? rawDeltaX : rawDeltaX * 10.0
+        let normalizedY = event.hasPreciseScrollingDeltas ? rawDeltaY : rawDeltaY * 10.0
 
-        // Keep zoom feel closer to canvas pan speed.
-        let gain: CGFloat = event.hasPreciseScrollingDeltas ? 0.006 : 0.012
-        let magnificationDelta = max(-0.12, min(0.12, normalizedDelta * gain))
-        return applyCanvasZoom(magnificationDelta: magnificationDelta, anchorWindowPoint: mouseInWindow)
+        if isZoomModifierActive(for: event) {
+            let dominant = abs(normalizedY) >= abs(normalizedX) ? normalizedY : normalizedX
+            guard abs(dominant) > 0.001 else { return false }
+            let gain: CGFloat = event.hasPreciseScrollingDeltas ? 0.006 : 0.012
+            let magnificationDelta = max(-0.12, min(0.12, dominant * gain))
+            return applyCanvasZoom(magnificationDelta: magnificationDelta, anchorViewPoint: mouseInGrid)
+        }
+
+        return applyCanvasPan(deltaX: normalizedX, deltaY: normalizedY)
     }
 
     private func isZoomModifierActive(for event: NSEvent) -> Bool {
@@ -673,22 +656,45 @@ final class WorkspaceRootViewController: NSViewController {
     }
 
     @discardableResult
-    private func applyCanvasZoom(magnificationDelta: CGFloat, anchorWindowPoint: CGPoint) -> Bool {
+    private func applyCanvasZoom(magnificationDelta: CGFloat, anchorViewPoint: CGPoint) -> Bool {
         guard currentLayoutMode == .canvas else { return false }
         guard magnificationDelta.isFinite, abs(magnificationDelta) > 0.0001 else { return false }
 
-        let currentMag = scrollView.magnification
+        let currentMag = gridView.cameraMagnification
         let scaleFactor = max(0.05, 1.0 + magnificationDelta)
         let targetMag = currentMag * scaleFactor
-        let clampedMag = max(scrollView.minMagnification, min(scrollView.maxMagnification, targetMag))
+        let clampedMag = max(minCanvasMagnification, min(maxCanvasMagnification, targetMag))
         guard abs(clampedMag - currentMag) > 0.0001 else { return false }
 
-        let mouseInClipView = scrollView.contentView.convert(anchorWindowPoint, from: nil)
-        let centerInDocument = gridView.convert(mouseInClipView, from: scrollView.contentView)
-        scrollView.setMagnification(clampedMag, centeredAt: centerInDocument)
+        let worldAtAnchor = CGPoint(
+            x: gridView.cameraOrigin.x + (anchorViewPoint.x / currentMag),
+            y: gridView.cameraOrigin.y + (anchorViewPoint.y / currentMag)
+        )
+        let newOrigin = CGPoint(
+            x: worldAtAnchor.x - (anchorViewPoint.x / clampedMag),
+            y: worldAtAnchor.y - (anchorViewPoint.y / clampedMag)
+        )
+        gridView.cameraMagnification = clampedMag
+        gridView.cameraOrigin = newOrigin
         lastCanvasCamera = currentCanvasCameraState() ?? lastCanvasCamera
+        scheduleCanvasCameraSaveDebounced()
+        return true
+    }
 
-        scheduleStateSave()
+    @discardableResult
+    private func applyCanvasPan(deltaX: CGFloat, deltaY: CGFloat) -> Bool {
+        guard currentLayoutMode == .canvas else { return false }
+        guard deltaX.isFinite, deltaY.isFinite else { return false }
+        let scale = max(0.01, gridView.cameraMagnification)
+        let worldDelta = CGPoint(x: deltaX / scale, y: deltaY / scale)
+        guard abs(worldDelta.x) > 0.0001 || abs(worldDelta.y) > 0.0001 else { return false }
+
+        gridView.cameraOrigin = CGPoint(
+            x: gridView.cameraOrigin.x - worldDelta.x,
+            y: gridView.cameraOrigin.y + worldDelta.y
+        )
+        lastCanvasCamera = currentCanvasCameraState() ?? lastCanvasCamera
+        scheduleCanvasCameraSaveDebounced()
         return true
     }
 
@@ -746,7 +752,7 @@ final class WorkspaceRootViewController: NSViewController {
         let plainSpaceDown = spaceDown && !commandDown && !optionDown && !controlDown
         let mouseInScreen = NSEvent.mouseLocation
         let hoveringWindow = window.frame.contains(mouseInScreen)
-        let canFollow = plainSpaceDown && (hoveringWindow || isWorkspaceGridWindowFocused())
+        let canFollow = plainSpaceDown && (hoveringWindow || isOrcvWindowFocused())
 
         guard canFollow else {
             lastSpaceFollowMouseScreenPoint = nil
@@ -762,20 +768,6 @@ final class WorkspaceRootViewController: NSViewController {
             }
         }
         lastSpaceFollowMouseScreenPoint = mouseInScreen
-    }
-
-    private func installCanvasCameraPersistenceObserverIfNeeded() {
-        guard canvasBoundsObserver == nil else { return }
-        canvasBoundsObserver = NotificationCenter.default.addObserver(
-            forName: NSView.boundsDidChangeNotification,
-            object: scrollView.contentView,
-            queue: .main
-        ) { [weak self] _ in
-            guard let self else { return }
-            guard self.currentLayoutMode == .canvas else { return }
-            self.lastCanvasCamera = self.currentCanvasCameraState() ?? self.lastCanvasCamera
-            self.scheduleCanvasCameraSaveDebounced()
-        }
     }
 
     private func scheduleCanvasCameraSaveDebounced() {
@@ -827,13 +819,18 @@ final class WorkspaceRootViewController: NSViewController {
         applyTileLabelMode(modifiers: mods)
         if event.type == .keyDown {
             if let slot = digitSlotForNavigationEvent(event) {
+                if shortcutMods == [.option], (1...9).contains(slot) {
+                    guard isOrcvWindowFocused() else { return false }
+                    _ = jumpToDisplaySlot(slot)
+                    return true
+                }
                 if shortcutMods == [.command] {
-                    guard isWorkspaceGridWindowFocused() else { return false }
+                    guard isOrcvWindowFocused() else { return false }
                     _ = saveCanvasSavepoint(slot: slot)
                     return true
                 }
                 if shortcutMods.isEmpty {
-                    guard isWorkspaceGridWindowFocused() else { return false }
+                    guard isOrcvWindowFocused() else { return false }
                     _ = recallCanvasSavepoint(slot: slot)
                     return true
                 }
@@ -846,6 +843,10 @@ final class WorkspaceRootViewController: NSViewController {
         }
 
         guard let action = shortcutManager.action(for: event) else { return false }
+        let windowFocused = isOrcvWindowFocused()
+        if actionRequiresFocusedWindow(action), !windowFocused {
+            return false
+        }
 
         switch action {
         case .toggleTeleport:
@@ -857,11 +858,9 @@ final class WorkspaceRootViewController: NSViewController {
             toggleTeleport()
             return true
         case .newDisplay:
-            guard isWorkspaceGridWindowFocused() else { return false }
             handleNewDisplay()
             return true
         case .removeDisplay:
-            guard isWorkspaceGridWindowFocused() else { return false }
             handleRemoveFocused()
             return true
         case .focusNext:
@@ -872,6 +871,18 @@ final class WorkspaceRootViewController: NSViewController {
             return true
         case .fullscreenSelected:
             openFullscreenForFocusedWorkspace()
+            return true
+        case .jumpNextDisplay:
+            _ = jumpToAdjacentDisplay(step: 1)
+            return true
+        }
+    }
+
+    private func actionRequiresFocusedWindow(_ action: ShortcutAction) -> Bool {
+        switch action {
+        case .toggleTeleport:
+            return false
+        case .newDisplay, .removeDisplay, .focusNext, .focusPrevious, .fullscreenSelected, .jumpNextDisplay:
             return true
         }
     }
@@ -904,7 +915,7 @@ final class WorkspaceRootViewController: NSViewController {
         }
     }
 
-    private func isWorkspaceGridWindowFocused() -> Bool {
+    private func isOrcvWindowFocused() -> Bool {
         guard NSApp.isActive, let window = view.window else { return false }
         return NSApp.keyWindow === window || NSApp.mainWindow === window
     }
@@ -1053,45 +1064,42 @@ final class WorkspaceRootViewController: NSViewController {
 
         struct Entry {
             let displayID: CGDirectDisplayID
-            let tileFrameTopLeft: CGRect
+            let tileFrameWorld: CGRect
             let displayBounds: CGRect
         }
 
-        let contentHeight = gridView.bounds.height
         let entries: [Entry] = virtualWorkspaces.compactMap { workspace in
-            guard let tileFrame = gridView.frameForWorkspaceInGrid(workspace.id) else { return nil }
+            guard let tileFrame = gridView.frameForWorkspaceInWorld(workspace.id) else { return nil }
             let displayBounds = CGDisplayBounds(workspace.displayID)
             guard tileFrame.width > 1, tileFrame.height > 1,
                   displayBounds.width > 1, displayBounds.height > 1 else {
                 return nil
             }
-            let topLeftFrame = CGRect(
-                x: tileFrame.minX,
-                y: contentHeight - tileFrame.maxY,
-                width: tileFrame.width,
-                height: tileFrame.height
-            )
-            return Entry(displayID: workspace.displayID, tileFrameTopLeft: topLeftFrame, displayBounds: displayBounds)
+            return Entry(displayID: workspace.displayID, tileFrameWorld: tileFrame, displayBounds: displayBounds)
         }
 
         guard !entries.isEmpty else { return [:] }
 
         var finalOrigins: [CGDirectDisplayID: CGPoint] = [:]
-        let tileMinX = entries.map { $0.tileFrameTopLeft.minX }.min() ?? 0
-        let tileMinY = entries.map { $0.tileFrameTopLeft.minY }.min() ?? 0
+        let tileMinX = entries.map { $0.tileFrameWorld.minX }.min() ?? 0
+        let tileTopY = entries.map { $0.tileFrameWorld.maxY }.max() ?? 0
+        let topLeftYForEntry: (Entry) -> CGFloat = { entry in
+            tileTopY - entry.tileFrameWorld.maxY
+        }
+        let tileMinY = entries.map(topLeftYForEntry).min() ?? 0
         let displayMinX = entries.map { $0.displayBounds.minX }.min() ?? 0
         let displayMinY = entries.map { $0.displayBounds.minY }.min() ?? 0
 
         let scaleCandidates = entries.flatMap { entry in
-            [entry.displayBounds.width / entry.tileFrameTopLeft.width,
-             entry.displayBounds.height / entry.tileFrameTopLeft.height]
+            [entry.displayBounds.width / entry.tileFrameWorld.width,
+             entry.displayBounds.height / entry.tileFrameWorld.height]
         }
         let scale = median(of: scaleCandidates)
         guard scale > 0 else { return [:] }
 
         for entry in entries {
-            let mappedX = displayMinX + (entry.tileFrameTopLeft.minX - tileMinX) * scale
-            let mappedY = displayMinY + (entry.tileFrameTopLeft.minY - tileMinY) * scale
+            let mappedX = displayMinX + (entry.tileFrameWorld.minX - tileMinX) * scale
+            let mappedY = displayMinY + (topLeftYForEntry(entry) - tileMinY) * scale
             finalOrigins[entry.displayID] = CGPoint(x: mappedX.rounded(), y: mappedY.rounded())
         }
         return finalOrigins
@@ -1101,10 +1109,9 @@ final class WorkspaceRootViewController: NSViewController {
         let virtualWorkspaces = workspaceStore.workspaces.filter { $0.kind == .virtual }
         guard !virtualWorkspaces.isEmpty else { return nil }
         var hasher = Hasher()
-        hasher.combine(Int((gridView.bounds.height * 10.0).rounded()))
         var included = 0
         for workspace in virtualWorkspaces {
-            guard let frame = gridView.frameForWorkspaceInGrid(workspace.id) else { continue }
+            guard let frame = gridView.frameForWorkspaceInWorld(workspace.id) else { continue }
             let bounds = CGDisplayBounds(workspace.displayID)
             hasher.combine(Int(workspace.displayID))
             hasher.combine(Int((frame.minX * 10.0).rounded()))
@@ -1135,17 +1142,8 @@ final class WorkspaceRootViewController: NSViewController {
     }
 
     private func layoutGridDocumentView() {
-        let viewportWidth = tileLayoutViewportWidth()
-        let width = max(viewportWidth, gridView.requiredContentWidth(forViewportWidth: viewportWidth))
-        let minHeight = max(1.0, scrollView.contentView.bounds.height)
-        let neededHeight = max(minHeight, gridView.requiredContentHeight(forWidth: width))
-
-        let newFrame = CGRect(x: 0, y: 0, width: width, height: neededHeight)
-        if gridView.frame.size != newFrame.size {
-            gridView.frame = newFrame
-            gridView.needsLayout = true
-            gridView.needsDisplay = true
-        }
+        gridView.needsLayout = true
+        gridView.needsDisplay = true
     }
 
     private func median(of values: [CGFloat]) -> CGFloat {
@@ -1220,18 +1218,6 @@ final class WorkspaceRootViewController: NSViewController {
         return CGSize(width: width, height: height)
     }
 
-    private func tileLayoutViewportWidth() -> CGFloat {
-        let baseWidth = max(1.0, scrollView.bounds.width)
-        guard scrollView.scrollerStyle == .legacy, scrollView.hasVerticalScroller else {
-            return baseWidth
-        }
-
-        // Keep layout width stable even if the legacy vertical scroller visibility toggles.
-        let controlSize = scrollView.verticalScroller?.controlSize ?? .regular
-        let scrollerWidth = NSScroller.scrollerWidth(for: controlSize, scrollerStyle: .legacy)
-        return max(1.0, baseWidth - scrollerWidth)
-    }
-
     private func flushPendingArrangementSyncAfterLiveResizeIfNeeded() {
         guard pendingArrangementSyncAfterLiveResize else { return }
         guard view.window?.inLiveResize != true else { return }
@@ -1241,61 +1227,106 @@ final class WorkspaceRootViewController: NSViewController {
 
     private func applyInteractionMode() {
         canvasBackdropView.isHidden = false
-        scrollView.minMagnification = 0.35
-        scrollView.maxMagnification = 3.0
-        scrollView.allowsMagnification = true
-        if scrollView.magnification < scrollView.minMagnification || scrollView.magnification > scrollView.maxMagnification {
-            let center = NSPoint(x: scrollView.contentView.bounds.midX, y: scrollView.contentView.bounds.midY)
-            scrollView.setMagnification(1.0, centeredAt: center)
+        if gridView.cameraMagnification < minCanvasMagnification || gridView.cameraMagnification > maxCanvasMagnification {
+            gridView.cameraMagnification = 1.0
         }
-        scrollView.hasVerticalScroller = false
-        scrollView.hasHorizontalScroller = false
-        scrollView.usesPredominantAxisScrolling = false
-        scrollView.verticalScrollElasticity = .automatic
-        scrollView.horizontalScrollElasticity = .automatic
     }
 
     private func centerCanvasViewport() {
         guard currentLayoutMode == .canvas else { return }
-        let viewportSize = scrollView.contentView.bounds.size
+        let viewportSize = gridView.bounds.size
         guard viewportSize.width > 1, viewportSize.height > 1 else { return }
         let targetOrigin = gridView.canvasInitialViewportOrigin(for: viewportSize)
-        scrollView.contentView.scroll(to: targetOrigin)
-        scrollView.reflectScrolledClipView(scrollView.contentView)
-        if let camera = currentCanvasCameraState() {
-            lastCanvasCamera = camera
-        }
+        gridView.cameraOrigin = targetOrigin
+        if let camera = currentCanvasCameraState() { lastCanvasCamera = camera }
     }
 
     private func currentCanvasCameraState() -> CanvasCameraState? {
         guard currentLayoutMode == .canvas else { return nil }
-        let mag = scrollView.magnification
+        let mag = gridView.cameraMagnification
         guard mag.isFinite, mag > 0 else { return nil }
-        let origin = scrollView.contentView.bounds.origin
+        let origin = gridView.cameraOrigin
         guard origin.x.isFinite, origin.y.isFinite else { return nil }
         return CanvasCameraState(magnification: mag, origin: origin)
     }
 
     private func applyCanvasCamera(_ camera: CanvasCameraState) {
         guard currentLayoutMode == .canvas else { return }
+        let clampedMag = max(minCanvasMagnification, min(maxCanvasMagnification, camera.magnification))
+        gridView.cameraMagnification = clampedMag
+        gridView.cameraOrigin = camera.origin
+        lastCanvasCamera = CanvasCameraState(magnification: clampedMag, origin: camera.origin)
+    }
 
-        let clampedMag = max(scrollView.minMagnification, min(scrollView.maxMagnification, camera.magnification))
-        if abs(scrollView.magnification - clampedMag) > 0.001 {
-            let center = NSPoint(x: scrollView.contentView.bounds.midX, y: scrollView.contentView.bounds.midY)
-            scrollView.setMagnification(clampedMag, centeredAt: center)
+    private func jumpToDisplaySlot(_ slot: Int) -> Bool {
+        guard (1...9).contains(slot) else { return false }
+        let workspaces = workspaceStore.workspaces
+        let index = slot - 1
+        guard index >= 0, index < workspaces.count else { return false }
+        let target = workspaces[index]
+        workspaceStore.selectOnly(workspaceID: target.id)
+        return jumpCameraToWorkspace(workspaceID: target.id, fitWidth: true)
+    }
+
+    private func jumpToAdjacentDisplay(step: Int) -> Bool {
+        let workspaces = workspaceStore.workspaces
+        guard !workspaces.isEmpty else { return false }
+        guard step != 0 else { return false }
+
+        let currentIndex = workspaceStore.focusedWorkspaceID
+            .flatMap { focusedID in workspaces.firstIndex(where: { $0.id == focusedID }) } ?? 0
+        let count = workspaces.count
+        let wrappedIndex = ((currentIndex + step) % count + count) % count
+        let target = workspaces[wrappedIndex]
+        workspaceStore.selectOnly(workspaceID: target.id)
+        return jumpCameraToWorkspace(workspaceID: target.id, fitWidth: true)
+    }
+
+    private func jumpCameraToWorkspace(workspaceID: UUID, fitWidth: Bool) -> Bool {
+        guard currentLayoutMode == .canvas else { return false }
+        layoutGridDocumentView()
+        view.layoutSubtreeIfNeeded()
+
+        guard let worldFrame = gridView.frameForWorkspaceInWorld(workspaceID) else { return false }
+        let viewport = gridView.bounds.size
+        guard viewport.width > 1, viewport.height > 1 else { return false }
+
+        var magnification = gridView.cameraMagnification
+        if fitWidth {
+            let desiredWidth = max(1.0, viewport.width * 0.90)
+            magnification = desiredWidth / max(1.0, worldFrame.width)
+            magnification = max(minCanvasMagnification, min(maxCanvasMagnification, magnification))
         }
-
-        let viewportSize = scrollView.contentView.bounds.size
-        let docSize = gridView.frame.size
-        let maxX = max(0.0, docSize.width - viewportSize.width)
-        let maxY = max(0.0, docSize.height - viewportSize.height)
-        let origin = CGPoint(
-            x: max(0.0, min(camera.origin.x, maxX)),
-            y: max(0.0, min(camera.origin.y, maxY))
+        let safeMag = max(minCanvasMagnification, min(maxCanvasMagnification, magnification))
+        let newOrigin = CGPoint(
+            x: worldFrame.midX - viewport.width / (2.0 * safeMag),
+            y: worldFrame.midY - viewport.height / (2.0 * safeMag)
         )
-        scrollView.contentView.scroll(to: origin)
-        scrollView.reflectScrolledClipView(scrollView.contentView)
-        lastCanvasCamera = CanvasCameraState(magnification: clampedMag, origin: origin)
+
+        gridView.cameraMagnification = safeMag
+        gridView.cameraOrigin = newOrigin
+        lastCanvasCamera = currentCanvasCameraState() ?? lastCanvasCamera
+        scheduleCanvasCameraSaveDebounced()
+        return true
+    }
+
+    private func ensureVisibleWorkspaceAfterBootstrap() {
+        guard currentLayoutMode == .canvas else { return }
+        guard !workspaceStore.workspaces.isEmpty else { return }
+        layoutGridDocumentView()
+        view.layoutSubtreeIfNeeded()
+
+        let viewport = gridView.bounds
+        guard viewport.width > 1, viewport.height > 1 else { return }
+        let isAnyWorkspaceVisible = workspaceStore.workspaces.contains { workspace in
+            guard let frame = gridView.frameForWorkspaceInGrid(workspace.id) else { return false }
+            return frame.intersects(viewport)
+        }
+        guard !isAnyWorkspaceVisible else { return }
+
+        let targetID = workspaceStore.focusedWorkspaceID ?? workspaceStore.workspaces.first?.id
+        guard let targetID else { return }
+        _ = jumpCameraToWorkspace(workspaceID: targetID, fitWidth: true)
     }
 
     private func saveCanvasSavepoint(slot: Int) -> Bool {
@@ -1318,7 +1349,7 @@ final class WorkspaceRootViewController: NSViewController {
     }
 
     private func defaultCanvasCameraState() -> CanvasCameraState? {
-        let viewport = scrollView.contentView.bounds.size
+        let viewport = gridView.bounds.size
         guard viewport.width > 1, viewport.height > 1 else { return nil }
         let origin = gridView.canvasInitialViewportOrigin(for: viewport)
         guard origin.x.isFinite, origin.y.isFinite else { return nil }
@@ -1596,21 +1627,27 @@ final class WorkspaceRootViewController: NSViewController {
     }
 
     func menuResetCanvasZoom() {
-        let clipCenter = CGPoint(
-            x: scrollView.contentView.bounds.midX,
-            y: scrollView.contentView.bounds.midY
+        guard currentLayoutMode == .canvas else { return }
+        let viewportSize = gridView.bounds.size
+        guard viewportSize.width > 1, viewportSize.height > 1 else { return }
+        let worldCenter = CGPoint(
+            x: gridView.cameraOrigin.x + viewportSize.width / (2.0 * max(0.01, gridView.cameraMagnification)),
+            y: gridView.cameraOrigin.y + viewportSize.height / (2.0 * max(0.01, gridView.cameraMagnification))
         )
-        scrollView.setMagnification(1.0, centeredAt: clipCenter)
+        gridView.cameraMagnification = 1.0
+        gridView.cameraOrigin = CGPoint(
+            x: worldCenter.x - viewportSize.width / 2.0,
+            y: worldCenter.y - viewportSize.height / 2.0
+        )
         lastCanvasCamera = currentCanvasCameraState() ?? lastCanvasCamera
         scheduleStateSave()
     }
 
     func menuJumpToCanvasOrigin() {
-        let viewport = scrollView.contentView.bounds.size
+        let viewport = gridView.bounds.size
         guard viewport.width > 1, viewport.height > 1 else { return }
         let target = gridView.canvasViewportOriginForWorldOrigin(viewportSize: viewport)
-        scrollView.contentView.scroll(to: target)
-        scrollView.reflectScrolledClipView(scrollView.contentView)
+        gridView.cameraOrigin = target
         lastCanvasCamera = currentCanvasCameraState() ?? lastCanvasCamera
         scheduleStateSave()
     }
@@ -1649,6 +1686,7 @@ final class WorkspaceRootViewController: NSViewController {
             } else {
                 self?.centerCanvasViewport()
             }
+            self?.ensureVisibleWorkspaceAfterBootstrap()
         }
 
         setTileStatus(nil)

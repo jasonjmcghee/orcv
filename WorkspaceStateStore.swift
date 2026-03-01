@@ -32,7 +32,7 @@ struct PersistedWorkspaceState: Codable {
 }
 
 final class WorkspaceStateStore {
-    private let queue = DispatchQueue(label: "com.pointworks.workspacegrid.state-store")
+    private let queue = DispatchQueue(label: "today.jason.orcv.state-store")
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private let fileURL: URL

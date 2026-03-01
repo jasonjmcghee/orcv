@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key>
-    <string>WorkspaceGrid</string>
+    <string>orcv</string>
     <key>CFBundleIdentifier</key>
-    <string>com.pointworks.workspacegrid</string>
+    <string>today.jason.orcv</string>
     <key>CFBundleName</key>
-    <string>Workspace Grid</string>
+    <string>orcv</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

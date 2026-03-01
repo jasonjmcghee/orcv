@@ -8,6 +8,7 @@ enum ShortcutAction: String, CaseIterable {
     case focusNext = "focus_next"
     case focusPrevious = "focus_previous"
     case fullscreenSelected = "fullscreen_selected"
+    case jumpNextDisplay = "jump_next_display"
 
     var title: String {
         switch self {
@@ -17,6 +18,7 @@ enum ShortcutAction: String, CaseIterable {
         case .focusNext: return "Focus Next"
         case .focusPrevious: return "Focus Previous"
         case .fullscreenSelected: return "Fullscreen Selected"
+        case .jumpNextDisplay: return "Jump Next Display"
         }
     }
 
@@ -28,6 +30,7 @@ enum ShortcutAction: String, CaseIterable {
         case .focusNext: return "ctrl+alt+right"
         case .focusPrevious: return "ctrl+alt+left"
         case .fullscreenSelected: return "cmd+shift+f"
+        case .jumpNextDisplay: return "alt+tab"
         }
     }
 }
@@ -541,7 +544,7 @@ final class ShortcutManager {
 
 private final class ShortcutStore {
     private let fileURL: URL
-    private let queue = DispatchQueue(label: "com.pointworks.workspacegrid.shortcut-store")
+    private let queue = DispatchQueue(label: "today.jason.orcv.shortcut-store")
 
     init(bundleIdentifier: String) {
         let fm = FileManager.default
@@ -594,7 +597,7 @@ private final class ShortcutStore {
     func save(bindings: [ShortcutAction: String]) {
         queue.async {
             var lines: [String] = []
-            lines.append("# Workspace Grid shortcuts")
+            lines.append("# orcv shortcuts")
             lines.append("[shortcuts]")
             for action in ShortcutAction.allCases {
                 let value = bindings[action] ?? action.defaultShortcut

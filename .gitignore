@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+
+# Local agent/tooling directories
+.claude/
+.codex/
+
+# Build outputs
+build/
+.build/
+DerivedData/
+*.app
+
+# Xcode user state
+*.xcworkspace/xcuserdata/
+xcuserdata/
+*.xcuserstate
+
+# Logs and temporary editor files
+*.log
+*.swp
+*~
+
+# Local environment files
+.env
+.env.*

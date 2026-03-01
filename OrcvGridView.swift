@@ -3,7 +3,7 @@ import Foundation
 import IOSurface
 import QuartzCore
 
-final class WorkspaceGridView: NSView {
+final class OrcvGridView: NSView {
     var workspaces: [Workspace] = [] {
         didSet {
             needsLayout = true
@@ -47,6 +47,29 @@ final class WorkspaceGridView: NSView {
         }
     }
 
+    var cameraMagnification: CGFloat = 1.0 {
+        didSet {
+            let clamped = max(0.01, cameraMagnification)
+            if abs(clamped - cameraMagnification) > 0.0001 {
+                cameraMagnification = clamped
+                return
+            }
+            guard abs(oldValue - cameraMagnification) > 0.0001 else { return }
+            needsLayout = true
+            needsDisplay = true
+            syncTileLayers()
+        }
+    }
+
+    var cameraOrigin: CGPoint = .zero {
+        didSet {
+            guard abs(oldValue.x - cameraOrigin.x) > 0.0001 || abs(oldValue.y - cameraOrigin.y) > 0.0001 else { return }
+            needsLayout = true
+            needsDisplay = true
+            syncTileLayers()
+        }
+    }
+
     var onFocusRequest: ((UUID, CGPoint, CGRect, NSEvent.ModifierFlags) -> Void)?
     var onResizeBegin: ((UUID) -> Void)?
     var onBackgroundClick: (() -> Void)?
@@ -72,6 +95,7 @@ final class WorkspaceGridView: NSView {
     }
 
     private var tileFrames: [UUID: CGRect] = [:]
+    private var tileWorldFrames: [UUID: CGRect] = [:]
     private var tileLayers: [UUID: TileLayers] = [:]
 
     private var resizingWorkspaceID: UUID?
@@ -93,8 +117,6 @@ final class WorkspaceGridView: NSView {
     private let spacing: CGFloat = 8.0
     private let tileCornerRadius: CGFloat = 2.0
     private let wrapTolerance: CGFloat = 0.5
-    private let canvasDocumentSize = CGSize(width: 1_000_000, height: 1_000_000)
-    private let canvasWorldOffset = CGPoint(x: 500_000, y: 500_000)
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -136,11 +158,11 @@ final class WorkspaceGridView: NSView {
 
     func requiredContentHeight(forWidth width: CGFloat) -> CGFloat {
         _ = width
-        return max(220.0, canvasDocumentSize.height)
+        return max(220.0, bounds.height)
     }
 
     func requiredContentWidth(forViewportWidth width: CGFloat) -> CGFloat {
-        return max(width, canvasDocumentSize.width)
+        return max(width, bounds.width)
     }
 
     override func layout() {
@@ -224,13 +246,7 @@ final class WorkspaceGridView: NSView {
             width: initialFrame.width,
             height: initialFrame.height
         )
-        let clampedFrame = CGRect(
-            x: max(0, newFrame.minX),
-            y: max(0, newFrame.minY),
-            width: newFrame.width,
-            height: newFrame.height
-        )
-        dragFrame = clampedFrame
+        dragFrame = newFrame
 
         if layoutMode == .canvas {
             syncTileLayers()
@@ -277,7 +293,7 @@ final class WorkspaceGridView: NSView {
 
         if layoutMode == .canvas {
             if let dragFrame {
-                onCanvasMoveCommit?(draggedID, canvasWorldOrigin(fromDocumentOrigin: dragFrame.origin))
+                onCanvasMoveCommit?(draggedID, worldPoint(fromViewportPoint: dragFrame.origin))
             }
             return
         }
@@ -307,13 +323,16 @@ final class WorkspaceGridView: NSView {
         tileFrames[workspaceID]
     }
 
+    func frameForWorkspaceInWorld(_ workspaceID: UUID) -> CGRect? {
+        tileWorldFrames[workspaceID]
+    }
+
     func canvasInitialViewportOrigin(for viewportSize: CGSize) -> CGPoint {
         let worldFrames = canvasWorldFrames(for: activeOrderIDs())
-        let documentBounds = CGRect(origin: .zero, size: canvasDocumentSize)
         guard !worldFrames.isEmpty else {
             return CGPoint(
-                x: max(0, min(canvasWorldOffset.x - viewportSize.width / 2.0, documentBounds.maxX - viewportSize.width)),
-                y: max(0, min(canvasWorldOffset.y - viewportSize.height / 2.0, documentBounds.maxY - viewportSize.height))
+                x: -viewportSize.width / (2.0 * max(0.01, cameraMagnification)),
+                y: -viewportSize.height / (2.0 * max(0.01, cameraMagnification))
             )
         }
 
@@ -322,20 +341,16 @@ final class WorkspaceGridView: NSView {
         let minY = worldFrames.values.map(\.minY).min() ?? 0
         let maxY = worldFrames.values.map(\.maxY).max() ?? 0
         let worldCenter = CGPoint(x: (minX + maxX) / 2.0, y: (minY + maxY) / 2.0)
-        let docCenter = canvasDocumentPoint(fromWorldPoint: worldCenter)
-
         return CGPoint(
-            x: max(0, min(docCenter.x - viewportSize.width / 2.0, documentBounds.maxX - viewportSize.width)),
-            y: max(0, min(docCenter.y - viewportSize.height / 2.0, documentBounds.maxY - viewportSize.height))
+            x: worldCenter.x - viewportSize.width / (2.0 * max(0.01, cameraMagnification)),
+            y: worldCenter.y - viewportSize.height / (2.0 * max(0.01, cameraMagnification))
         )
     }
 
     func canvasViewportOriginForWorldOrigin(viewportSize: CGSize) -> CGPoint {
-        let documentBounds = CGRect(origin: .zero, size: canvasDocumentSize)
-        let docOrigin = canvasDocumentPoint(fromWorldPoint: .zero)
         return CGPoint(
-            x: max(0, min(docOrigin.x - viewportSize.width / 2.0, documentBounds.maxX - viewportSize.width)),
-            y: max(0, min(docOrigin.y - viewportSize.height / 2.0, documentBounds.maxY - viewportSize.height))
+            x: -viewportSize.width / (2.0 * max(0.01, cameraMagnification)),
+            y: -viewportSize.height / (2.0 * max(0.01, cameraMagnification))
         )
     }
 
@@ -382,7 +397,12 @@ final class WorkspaceGridView: NSView {
     }
 
     private func recomputeTileFrames() {
-        tileFrames = layoutFrames(for: activeOrderIDs())
+        let worldFrames = canvasWorldFrames(
+            for: activeOrderIDs(),
+            layoutWidth: max(1.0, bounds.width / max(0.01, cameraMagnification))
+        )
+        tileWorldFrames = worldFrames
+        tileFrames = viewportFrames(fromWorldFrames: worldFrames)
     }
 
     private func syncTileLayers() {
@@ -590,17 +610,13 @@ final class WorkspaceGridView: NSView {
     }
 
     private func layoutFrames(for orderIDs: [UUID], layoutWidth: CGFloat? = nil) -> [UUID: CGRect] {
-        canvasLayoutFrames(for: orderIDs, layoutWidth: layoutWidth)
+        let worldFrames = canvasWorldFrames(for: orderIDs, layoutWidth: layoutWidth)
+        return viewportFrames(fromWorldFrames: worldFrames)
     }
 
     private func canvasLayoutFrames(for orderIDs: [UUID], layoutWidth: CGFloat? = nil) -> [UUID: CGRect] {
         let worldFrames = canvasWorldFrames(for: orderIDs, layoutWidth: layoutWidth)
-        var frames: [UUID: CGRect] = [:]
-        for (workspaceID, worldFrame) in worldFrames {
-            let docOrigin = canvasDocumentPoint(fromWorldPoint: worldFrame.origin)
-            frames[workspaceID] = CGRect(origin: docOrigin, size: worldFrame.size)
-        }
-        return frames
+        return viewportFrames(fromWorldFrames: worldFrames)
     }
 
     private func canvasWorldFrames(for orderIDs: [UUID], layoutWidth: CGFloat? = nil) -> [UUID: CGRect] {
@@ -663,11 +679,25 @@ final class WorkspaceGridView: NSView {
         return CGSize(width: targetHeight * ratio, height: targetHeight)
     }
 
-    private func canvasWorldOrigin(fromDocumentOrigin origin: CGPoint) -> CGPoint {
-        CGPoint(x: origin.x - canvasWorldOffset.x, y: origin.y - canvasWorldOffset.y)
+    private func viewportFrames(fromWorldFrames worldFrames: [UUID: CGRect]) -> [UUID: CGRect] {
+        let scale = max(0.01, cameraMagnification)
+        var frames: [UUID: CGRect] = [:]
+        for (workspaceID, worldFrame) in worldFrames {
+            let origin = CGPoint(
+                x: (worldFrame.origin.x - cameraOrigin.x) * scale,
+                y: (worldFrame.origin.y - cameraOrigin.y) * scale
+            )
+            let size = CGSize(width: worldFrame.width * scale, height: worldFrame.height * scale)
+            frames[workspaceID] = CGRect(origin: origin, size: size)
+        }
+        return frames
     }
 
-    private func canvasDocumentPoint(fromWorldPoint point: CGPoint) -> CGPoint {
-        CGPoint(x: point.x + canvasWorldOffset.x, y: point.y + canvasWorldOffset.y)
+    private func worldPoint(fromViewportPoint point: CGPoint) -> CGPoint {
+        let scale = max(0.01, cameraMagnification)
+        return CGPoint(
+            x: point.x / scale + cameraOrigin.x,
+            y: point.y / scale + cameraOrigin.y
+        )
     }
 }
