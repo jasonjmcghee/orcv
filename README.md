@@ -10,7 +10,7 @@ In today's world, long-running tasks that you have to manage have visual aspects
 
 The first version of this came together pretty quickly, but I've spent more time trying to nail the UX and just trying things out until they felt "right" than actually implementing the software itself. I just redid things until they never hitched and felt natural. 
 
-It's built it in a way that it's very cheap to render your many desktops.
+It's built it in a way that it's mean to be cheap to render your many desktops, but any and all ideas to improve performance are very welcome.
 
 I encourage you to just, try it out to get a feel for it.
 
