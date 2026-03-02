@@ -36,24 +36,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     func applicationDidBecomeActive(_ notification: Notification) {
         _ = notification
-        rootViewController?.windowVisibilityStateDidChange()
         guard rootViewController == nil else { return }
         evaluateLaunchPermissions()
-    }
-
-    func applicationDidResignActive(_ notification: Notification) {
-        _ = notification
-        rootViewController?.windowVisibilityStateDidChange()
-    }
-
-    func applicationDidHide(_ notification: Notification) {
-        _ = notification
-        rootViewController?.windowVisibilityStateDidChange()
-    }
-
-    func applicationDidUnhide(_ notification: Notification) {
-        _ = notification
-        rootViewController?.windowVisibilityStateDidChange()
     }
 
     private func startMainApplication(hasScreenCaptureAccess: Bool) {
@@ -794,19 +778,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     func windowDidBecomeKey(_ notification: Notification) {
         guard let window = notification.object as? NSWindow else { return }
         applyChromelessWindowStyle(window)
-        rootViewController?.windowVisibilityStateDidChange()
-    }
-
-    func windowDidResignKey(_ notification: Notification) {
-        guard let eventWindow = notification.object as? NSWindow else { return }
-        guard eventWindow == window else { return }
-        rootViewController?.windowVisibilityStateDidChange()
-    }
-
-    func windowDidChangeOcclusionState(_ notification: Notification) {
-        guard let eventWindow = notification.object as? NSWindow else { return }
-        guard eventWindow == window else { return }
-        rootViewController?.windowVisibilityStateDidChange()
     }
 
     func windowWillStartLiveResize(_ notification: Notification) {
