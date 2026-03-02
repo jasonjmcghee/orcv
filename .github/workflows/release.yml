@@ -86,7 +86,7 @@ jobs:
             CODE_SIGN_STYLE=Manual \
             CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
             CODE_SIGN_IDENTITY="$SIGNING_IDENTITY" \
-            OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN_FILE --options=runtime" \
+            OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN_FILE --options=runtime --timestamp" \
             build
 
           ditto build/DerivedData/Build/Products/Release/orcv.app build/orcv.app
@@ -99,6 +99,12 @@ jobs:
           # Verify hardened runtime flag is set (required for notarization).
           if ! codesign -dv --verbose=4 build/orcv.app 2>&1 | grep -q 'runtime'; then
             echo "error: hardened runtime flag not set on signed app" >&2
+            exit 1
+          fi
+
+          # Verify secure timestamp is present (required for notarization).
+          if ! codesign -dv --verbose=4 build/orcv.app 2>&1 | grep -q '^Timestamp='; then
+            echo "error: secure timestamp missing from app signature" >&2
             exit 1
           fi
 
