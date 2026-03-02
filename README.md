@@ -18,9 +18,10 @@ I encourage you to just, try it out to get a feel for it.
 
 ![Demo]()
 
-# Features / How To
+# Features
 
-The main features / user flows are:
+I recommend reading the little "Getting Started" guide when you try it, but at a high level, you can:
+
 - open a virtual desktop that you can freely interact with (`cmd+n` by default - hover over one and hit `cmd+w` to close)
 - teleport your mouse or a window to a desktop by hovering it over a tile and then hitting "teleport" (`cmd+cmd` by default)
 - create "savepoints" that save the orcv PiP window location and size, and canvas pan and zoom that you can recall (`cmd+0-9` to save and `0-9` to recall by default).
