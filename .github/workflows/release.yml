@@ -110,23 +110,34 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Create a temporary zip for notarization submission.
           ditto -c -k --keepParent build/orcv.app build/orcv-notarize.zip
 
-          echo "Submitting for notarization..."
+          echo "Submitting app for notarization..."
           xcrun notarytool submit build/orcv-notarize.zip \
             --apple-id "$NOTARIZE_APPLE_ID" \
             --password "$NOTARIZE_PASSWORD" \
             --team-id "$NOTARIZE_TEAM_ID" \
             --wait \
-            --timeout 30m
+            --timeout 30m \
+            --output-format json | tee build/notary-app-result.json
 
-          echo "Stapling notarization ticket..."
+          APP_NOTARY_ID="$(plutil -extract id raw -o - build/notary-app-result.json)"
+          APP_NOTARY_STATUS="$(plutil -extract status raw -o - build/notary-app-result.json)"
+          echo "App notarization status: $APP_NOTARY_STATUS (id: $APP_NOTARY_ID)"
+
+          if [ "$APP_NOTARY_STATUS" != "Accepted" ]; then
+            echo "::error::App notarization failed with status $APP_NOTARY_STATUS (id: $APP_NOTARY_ID)"
+            xcrun notarytool log "$APP_NOTARY_ID" \
+              --apple-id "$NOTARIZE_APPLE_ID" \
+              --password "$NOTARIZE_PASSWORD" \
+              --team-id "$NOTARIZE_TEAM_ID" \
+              --output-format json | tee build/notary-app-log.json || true
+            exit 1
+          fi
+
+          echo "Stapling app notarization ticket..."
           xcrun stapler staple build/orcv.app
-
-          # Verify the staple took effect.
           xcrun stapler validate build/orcv.app
-
           rm -f build/orcv-notarize.zip
 
       - name: Create DMG
@@ -152,9 +163,24 @@ jobs:
             --password "$NOTARIZE_PASSWORD" \
             --team-id "$NOTARIZE_TEAM_ID" \
             --wait \
-            --timeout 30m
+            --timeout 30m \
+            --output-format json | tee build/notary-dmg-result.json
 
-          echo "Stapling notarization ticket to DMG..."
+          DMG_NOTARY_ID="$(plutil -extract id raw -o - build/notary-dmg-result.json)"
+          DMG_NOTARY_STATUS="$(plutil -extract status raw -o - build/notary-dmg-result.json)"
+          echo "DMG notarization status: $DMG_NOTARY_STATUS (id: $DMG_NOTARY_ID)"
+
+          if [ "$DMG_NOTARY_STATUS" != "Accepted" ]; then
+            echo "::error::DMG notarization failed with status $DMG_NOTARY_STATUS (id: $DMG_NOTARY_ID)"
+            xcrun notarytool log "$DMG_NOTARY_ID" \
+              --apple-id "$NOTARIZE_APPLE_ID" \
+              --password "$NOTARIZE_PASSWORD" \
+              --team-id "$NOTARIZE_TEAM_ID" \
+              --output-format json | tee build/notary-dmg-log.json || true
+            exit 1
+          fi
+
+          echo "Stapling DMG notarization ticket..."
           xcrun stapler staple "build/orcv-${{ env.VERSION }}.dmg"
           xcrun stapler validate "build/orcv-${{ env.VERSION }}.dmg"
 
