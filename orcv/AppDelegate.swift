@@ -934,7 +934,7 @@ private final class PermissionGateWindowController: NSWindowController {
         titleLabel.alignment = .center
 
         let subtitleLabel = NSTextField(
-            wrappingLabelWithString: "orcv needs Accessibility and Screen Recording to control windows and show live display previews."
+            wrappingLabelWithString: "orcv needs Accessibility and Screen Recording to teleport your mouse and stream virtual displays. orcv does not keep or send recordings of screens or keystrokes. orcv records no telemetry. orcv does not use networking of any kind. orcv is open source, MIT licensed."
         )
         subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
         subtitleLabel.font = NSFont.systemFont(ofSize: 13, weight: .regular)
