@@ -6,7 +6,7 @@ orcv (ork-vee) is a macos app that lets you create virtual displays in an infini
 
 _These are real / recognized displays by macos, which are automatically arranged based on how you arrange them in the canvas, just like if you had a bunch of monitors on your desk._
 
-<img width="896" height="566" alt="Screenshot 2026-03-01 at 2 48 54 PM" src="https://github.com/user-attachments/assets/5c5096bd-c0b4-4ebe-b548-394c814d9f9d" />
+<img width="900" height="585" alt="Screenshot 2026-03-02 at 5 58 36 AM" src="https://github.com/user-attachments/assets/3040e9ac-2c7c-4fee-86aa-68607558eafb" />
 
 In today's world, long-running tasks that you have to manage have visual aspects. That doesn't work well with the terminal. tmux and Zellij and friends have a lot of great attributes, but I had yet to use something that checked all my boxes.
 
