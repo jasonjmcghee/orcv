@@ -1,5 +1,7 @@
 # <img src="./orcv/Assets.xcassets/AppIcon.appiconset/icon_128x128.png" width="64" height="64" align="center"> orcv
 
+_if `tmux` was built for window management on macos in 2026_
+
 orcv (ork-vee) is a macos app that lets you create virtual displays in an infinite canvas (zoom/pan), arrange them, create "savepoints" and rapidly jump between them, teleport windows or your mouse to or from them, or fullscreen one, all in a picture-in-picture style overlay you can keep on your main display.
 
 _These are real / recognized displays by macos, which are automatically arranged based on how you arrange them in the canvas, just like if you had a bunch of monitors on your desk._
