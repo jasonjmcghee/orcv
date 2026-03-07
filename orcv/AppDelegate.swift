@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var centerTileOnJumpMenuItem: NSMenuItem?
     private var preserveSizeOnSlotJumpMenuItem: NSMenuItem?
     private var restoreWindowFrameOnSavepointRecallMenuItem: NSMenuItem?
+    private var requireHoldingMoveShortcutMenuItem: NSMenuItem?
     private var swapResizeBehaviorMenuItem: NSMenuItem?
     private var sharpCornersMenuItem: NSMenuItem?
     private var windowVisibilityMenuItem: NSMenuItem?
@@ -24,6 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var autoArrangeRowItem: NSMenuItem?
     private var autoArrangeSquareItem: NSMenuItem?
     private var arrangeSettingsWindowController: ArrangeSettingsWindowController?
+    private var limitFPSSettingsWindowController: LimitFPSSettingsWindowController?
     private var terminateInProgress = false
     private var didShowMainWindow = false
 
@@ -268,6 +270,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         sharpCornersMenuItem = sharpCornersItem
         viewMenu.addItem(sharpCornersItem)
 
+        let limitFPSSettingsItem = NSMenuItem(
+            title: "Limit FPS Settings…",
+            action: #selector(showLimitFPSSettings(_:)),
+            keyEquivalent: ""
+        )
+        limitFPSSettingsItem.target = self
+        viewMenu.addItem(limitFPSSettingsItem)
+
         viewMenu.addItem(.separator())
 
         let resetZoomItem = NSMenuItem(
@@ -422,6 +432,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         windowVisibilityItem.target = self
         windowVisibilityMenuItem = windowVisibilityItem
         windowMenu.addItem(windowVisibilityItem)
+
+        let requireHoldingMoveShortcutItem = NSMenuItem(
+            title: "Require Holding Move Shortcut",
+            action: #selector(toggleRequireHoldingMoveShortcut(_:)),
+            keyEquivalent: ""
+        )
+        requireHoldingMoveShortcutItem.target = self
+        requireHoldingMoveShortcutItem.state = .off
+        requireHoldingMoveShortcutMenuItem = requireHoldingMoveShortcutItem
+        windowMenu.addItem(requireHoldingMoveShortcutItem)
         windowMenuItem.submenu = windowMenu
 
         let developerMenuItem = NSMenuItem()
@@ -653,6 +673,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     @objc
+    private func toggleRequireHoldingMoveShortcut(_ sender: Any?) {
+        _ = sender
+        rootViewController?.menuToggleRequireHoldingMoveShortcut()
+        requireHoldingMoveShortcutMenuItem?.state = rootViewController?.menuRequireHoldingMoveShortcutEnabled() == true ? .on : .off
+    }
+
+    @objc
     private func toggleSwapResizeBehavior(_ sender: Any?) {
         _ = sender
         rootViewController?.menuToggleSwapResizeBehavior()
@@ -751,6 +778,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    @objc
+    private func showLimitFPSSettings(_ sender: Any?) {
+        _ = sender
+        guard let rootViewController else { return }
+        if limitFPSSettingsWindowController == nil {
+            limitFPSSettingsWindowController = LimitFPSSettingsWindowController(
+                currentLimitFPS: { [weak rootViewController] in
+                    rootViewController?.menuLimitFPSValue() ?? 60.0
+                },
+                currentUnlockIfInteracting: { [weak rootViewController] in
+                    rootViewController?.menuUnlockFPSIfInteractingEnabled() ?? true
+                },
+                currentUnlockIfLargerThanPercent: { [weak rootViewController] in
+                    rootViewController?.menuUnlockFPSIfLargerThanPercentEnabled() ?? false
+                },
+                currentUnlockThresholdPercent: { [weak rootViewController] in
+                    rootViewController?.menuUnlockFPSLargerThanPercentThreshold() ?? 70.0
+                },
+                onSave: { [weak rootViewController] limitFPS, unlockIfInteracting, unlockIfLargerThanPercent, thresholdPercent in
+                    rootViewController?.menuSetLimitFPSSettings(
+                        limitFPS: limitFPS,
+                        unlockIfInteracting: unlockIfInteracting,
+                        unlockIfLargerThanPercent: unlockIfLargerThanPercent,
+                        unlockIfLargerThresholdPercent: thresholdPercent
+                    )
+                }
+            )
+        }
+        limitFPSSettingsWindowController?.showWindow(nil)
+        limitFPSSettingsWindowController?.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
     private func refreshAutoArrangeMenuState() {
         let current = rootViewController?.menuAutoArrangeMode()
         autoArrangeOffItem?.state = current == nil ? .on : .off
@@ -825,6 +885,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         centerTileOnJumpMenuItem?.state = rootViewController?.menuCenterTileOnJumpEnabled() == true ? .on : .off
         preserveSizeOnSlotJumpMenuItem?.state = rootViewController?.menuPreserveSizeOnSlotJumpEnabled() == true ? .on : .off
         restoreWindowFrameOnSavepointRecallMenuItem?.state = rootViewController?.menuRestoreWindowFrameOnSavepointRecallEnabled() == true ? .on : .off
+        requireHoldingMoveShortcutMenuItem?.state = rootViewController?.menuRequireHoldingMoveShortcutEnabled() == true ? .on : .off
         swapResizeBehaviorMenuItem?.state = rootViewController?.menuSwapResizeBehaviorEnabled() == true ? .on : .off
         sharpCornersMenuItem?.state = rootViewController?.menuSharpCornersEnabled() == true ? .on : .off
         DispatchQueue.main.async { [weak self] in
@@ -835,6 +896,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self?.centerTileOnJumpMenuItem?.state = self?.rootViewController?.menuCenterTileOnJumpEnabled() == true ? .on : .off
             self?.preserveSizeOnSlotJumpMenuItem?.state = self?.rootViewController?.menuPreserveSizeOnSlotJumpEnabled() == true ? .on : .off
             self?.restoreWindowFrameOnSavepointRecallMenuItem?.state = self?.rootViewController?.menuRestoreWindowFrameOnSavepointRecallEnabled() == true ? .on : .off
+            self?.requireHoldingMoveShortcutMenuItem?.state = self?.rootViewController?.menuRequireHoldingMoveShortcutEnabled() == true ? .on : .off
             self?.swapResizeBehaviorMenuItem?.state = self?.rootViewController?.menuSwapResizeBehaviorEnabled() == true ? .on : .off
             self?.sharpCornersMenuItem?.state = self?.rootViewController?.menuSharpCornersEnabled() == true ? .on : .off
         }

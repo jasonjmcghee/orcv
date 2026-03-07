@@ -39,6 +39,11 @@ struct PersistedWorkspaceState: Codable {
     var arrangePadding: Double?
     var autoArrangeModeRawValue: String?
     var sharpCorners: Bool?
+    var requireHoldingMoveShortcut: Bool?
+    var limitFPS: Double?
+    var unlockFPSIfInteracting: Bool?
+    var unlockFPSIfLargerThanPercent: Bool?
+    var unlockFPSLargerThanPercentThreshold: Double?
     var workspaces: [WorkspaceEntry]
 }
 
