@@ -15,6 +15,21 @@ struct DisplayDescriptor {
     let title: String
     let pixelSize: CGSize
     let kind: WorkspaceKind
+    let maxFPS: Double
+
+    init(
+        displayID: CGDirectDisplayID,
+        title: String,
+        pixelSize: CGSize,
+        kind: WorkspaceKind,
+        maxFPS: Double = 60.0
+    ) {
+        self.displayID = displayID
+        self.title = title
+        self.pixelSize = pixelSize
+        self.kind = kind
+        self.maxFPS = maxFPS
+    }
 }
 
 struct Workspace {

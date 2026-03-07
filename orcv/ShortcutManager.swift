@@ -22,7 +22,7 @@ enum ShortcutAction: String, CaseIterable {
         case .fullscreenSelected: return "Fullscreen Selected"
         case .jumpNextDisplay: return "Jump Next Display"
         case .jumpPreviousDisplay: return "Jump Previous Display"
-        case .windowFollowHold: return "Window Follow (Hold)"
+        case .windowFollowHold: return "Move Window"
         case .deselectTile: return "Deselect Tile"
         case .hideWindow: return "Hide Window"
         case .navigateBack: return "Navigate Back"

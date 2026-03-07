@@ -28,6 +28,7 @@ final class DisplayStreamManager {
         let handler: CGDisplayFrameHandler
         let width: Int
         let height: Int
+        let maxFPS: Double
     }
 
     private var entries: [CGDirectDisplayID: StreamEntry] = [:]
@@ -81,9 +82,12 @@ final class DisplayStreamManager {
         for (displayID, descriptor) in uniqueByDisplay {
             let expectedWidth = Int(max(1.0, descriptor.pixelSize.width))
             let expectedHeight = Int(max(1.0, descriptor.pixelSize.height))
+            let expectedMaxFPS = normalizedMaxFPS(descriptor.maxFPS)
 
             if let existing = entries[displayID] {
-                if existing.width != expectedWidth || existing.height != expectedHeight {
+                if existing.width != expectedWidth
+                    || existing.height != expectedHeight
+                    || abs(existing.maxFPS - expectedMaxFPS) > 0.0001 {
                     stopStream(for: displayID)
                     startStream(for: descriptor, attempt: 0)
                 }
@@ -104,8 +108,11 @@ final class DisplayStreamManager {
 
         let outputWidth = Int(max(1.0, descriptor.pixelSize.width))
         let outputHeight = Int(max(1.0, descriptor.pixelSize.height))
+        let maxFPS = normalizedMaxFPS(descriptor.maxFPS)
+        let minFrameTime = 1.0 / maxFPS
         let streamProperties: CFDictionary = [
             "kCGDisplayStreamShowCursor" as CFString: kCFBooleanTrue as Any,
+            CGDisplayStream.minimumFrameTime as CFString: NSNumber(value: minFrameTime),
         ] as CFDictionary
 
         let handler: CGDisplayFrameHandler = { [weak self] status, _, frameSurface, _ in
@@ -163,8 +170,14 @@ final class DisplayStreamManager {
             stream: stream,
             handler: handler,
             width: outputWidth,
-            height: outputHeight
+            height: outputHeight,
+            maxFPS: maxFPS
         )
+    }
+
+    private func normalizedMaxFPS(_ fps: Double) -> Double {
+        guard fps.isFinite else { return 60.0 }
+        return min(120.0, max(1.0, fps))
     }
 
     private func stopStream(for displayID: CGDirectDisplayID) {

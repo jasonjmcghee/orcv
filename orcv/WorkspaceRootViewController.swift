@@ -58,6 +58,8 @@ final class WorkspaceRootViewController: NSViewController {
     private var localMagnifyMonitor: Any?
     private var globalMagnifyMonitor: Any?
     private var canvasCameraSaveDebounceWorkItem: DispatchWorkItem?
+    private var defaultNotificationObservers: [NSObjectProtocol] = []
+    private var workspaceNotificationObservers: [NSObjectProtocol] = []
     private var windowLevelPollingTimer: Timer?
     private var spaceFollowWindowTimer: Timer?
     private var lastSpaceFollowMouseScreenPoint: CGPoint?
@@ -96,11 +98,23 @@ final class WorkspaceRootViewController: NSViewController {
     private var centerTileOnJumpEnabled = false
     private var preserveSizeOnSlotJumpEnabled = false
     private var restoreWindowFrameOnSavepointRecallEnabled = true
+    private var requireHoldingMoveShortcutEnabled = false
     private var swapResizeBehaviorEnabled = false
+    private var windowFollowToggleActive = false
+    private var moveCursorActive = false
+    private var fpsLimitValue: Double = 60.0
+    private var unlockFPSIfInteractingEnabled = true
+    private var unlockFPSIfLargerThanPercentEnabled = false
+    private var unlockFPSLargerThanPercentThreshold: Double = 70.0
     private(set) var arrangePadding: CGFloat = 2.0
     private(set) var autoArrangeMode: ArrangeMode?
     private var pendingScrollZoomDelta: CGFloat = 0.0
     private var shiftPanAxisLock: ShiftPanAxisLock?
+    private var streamRefreshWorkItem: DispatchWorkItem?
+    private var lastDisplayDescriptorSignature: UInt64?
+    private let defaultVisibleDisplayFPS: Double = 60.0
+    private let offscreenDisplayFPS: Double = 2.0
+    private let backgroundDisplayFPS: Double = 1.0
     private var cameraHistory: [CameraHistoryEntry] = []
     private var cameraHistoryCursor: Int = -1
     private var isNavigatingHistory = false
@@ -150,9 +164,12 @@ final class WorkspaceRootViewController: NSViewController {
             NSEvent.removeMonitor(globalMagnifyMonitor)
         }
         canvasCameraSaveDebounceWorkItem?.cancel()
+        streamRefreshWorkItem?.cancel()
         immersiveTeleportWorkItem?.cancel()
         windowLevelPollingTimer?.invalidate()
         spaceFollowWindowTimer?.invalidate()
+        setMoveCursorActive(false)
+        teardownStreamVisibilityObservers()
     }
 
     override var undoManager: UndoManager? {
@@ -171,6 +188,7 @@ final class WorkspaceRootViewController: NSViewController {
     override func viewDidAppear() {
         super.viewDidAppear()
         lastObservedWindowFrame = view.window?.frame
+        installStreamVisibilityObserversIfNeeded()
         installWindowLevelMonitorIfNeeded()
         installSpaceFollowWindowMonitorIfNeeded()
         refreshGridWindowLevelForPointerMapping()
@@ -179,6 +197,7 @@ final class WorkspaceRootViewController: NSViewController {
     override func viewWillDisappear() {
         super.viewWillDisappear()
         lastObservedWindowFrame = nil
+        teardownStreamVisibilityObservers()
         teardownWindowLevelMonitor()
         teardownSpaceFollowWindowMonitor()
     }
@@ -188,6 +207,7 @@ final class WorkspaceRootViewController: NSViewController {
         adjustCanvasCameraForWindowResizeIfNeeded()
         updateEmptyStateCallout()
         layoutGridDocumentView()
+        scheduleDisplayStreamRefresh()
         flushPendingArrangementSyncAfterLiveResizeIfNeeded()
     }
 
@@ -395,6 +415,70 @@ final class WorkspaceRootViewController: NSViewController {
         let validDisplayIDs = Set(workspaceStore.workspaces.map(\.displayID))
         previewWindowController.closeIfDisplayMissing(validDisplayIDs: validDisplayIDs)
         refreshGridWindowLevelForPointerMapping()
+        scheduleDisplayStreamRefresh()
+    }
+
+    private func installStreamVisibilityObserversIfNeeded() {
+        guard defaultNotificationObservers.isEmpty, workspaceNotificationObservers.isEmpty else { return }
+        guard let window = view.window else { return }
+
+        let center = NotificationCenter.default
+        let refresh: (Notification) -> Void = { [weak self] _ in
+            self?.scheduleDisplayStreamRefresh(immediate: true)
+        }
+
+        defaultNotificationObservers.append(center.addObserver(
+            forName: NSWindow.didChangeOcclusionStateNotification,
+            object: window,
+            queue: .main,
+            using: refresh
+        ))
+        defaultNotificationObservers.append(center.addObserver(
+            forName: NSWindow.didBecomeKeyNotification,
+            object: window,
+            queue: .main,
+            using: refresh
+        ))
+        defaultNotificationObservers.append(center.addObserver(
+            forName: NSWindow.didResignKeyNotification,
+            object: window,
+            queue: .main,
+            using: refresh
+        ))
+        defaultNotificationObservers.append(center.addObserver(
+            forName: NSApplication.didHideNotification,
+            object: nil,
+            queue: .main,
+            using: refresh
+        ))
+        defaultNotificationObservers.append(center.addObserver(
+            forName: NSApplication.didUnhideNotification,
+            object: nil,
+            queue: .main,
+            using: refresh
+        ))
+
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        workspaceNotificationObservers.append(workspaceCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil,
+            queue: .main,
+            using: refresh
+        ))
+    }
+
+    private func teardownStreamVisibilityObservers() {
+        let center = NotificationCenter.default
+        for observer in defaultNotificationObservers {
+            center.removeObserver(observer)
+        }
+        defaultNotificationObservers.removeAll(keepingCapacity: true)
+
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        for observer in workspaceNotificationObservers {
+            workspaceCenter.removeObserver(observer)
+        }
+        workspaceNotificationObservers.removeAll(keepingCapacity: true)
     }
 
     private func materializeUnpositionedCanvasOriginsIfNeeded() {
@@ -592,13 +676,155 @@ final class WorkspaceRootViewController: NSViewController {
     }
 
     private func currentDisplayDescriptors() -> [DisplayDescriptor] {
-        workspaceStore.workspaces.map {
-            DisplayDescriptor(
-                displayID: $0.displayID,
-                title: $0.title,
-                pixelSize: $0.displayPixelSize,
-                kind: $0.kind
+        let workspaces = workspaceStore.workspaces
+        guard !workspaces.isEmpty else { return [] }
+        let interactionUnlockDisplayID = interactingDisplayIDFromMouse()
+        let viewport = gridView.bounds
+        let viewportArea = max(1.0, viewport.width * viewport.height)
+
+        if let immersiveDisplayID = previewWindowController.presentedDisplayID {
+            let immersiveFPS = effectiveVisibleDisplayFPS(
+                visibleRect: nil,
+                viewportArea: viewportArea,
+                interactionUnlockForDisplay: interactionUnlockDisplayID == immersiveDisplayID
             )
+            return workspaces.map { workspace in
+                DisplayDescriptor(
+                    displayID: workspace.displayID,
+                    title: workspace.title,
+                    pixelSize: workspace.displayPixelSize,
+                    kind: workspace.kind,
+                    maxFPS: workspace.displayID == immersiveDisplayID ? immersiveFPS : backgroundDisplayFPS
+                )
+            }
+        }
+
+        let windowVisible = isOrcvWindowVisibleForCapture()
+        let window = view.window
+
+        return workspaces.map { workspace in
+            let targetFPS: Double
+            if unlockFPSIfInteractingEnabled, interactionUnlockDisplayID == workspace.displayID {
+                targetFPS = max(clampedFPSLimit(fpsLimitValue), defaultVisibleDisplayFPS)
+            } else if !windowVisible {
+                targetFPS = backgroundDisplayFPS
+            } else if let frameInGrid = gridView.frameForWorkspaceInGrid(workspace.id) {
+                let visibleRect = frameInGrid.intersection(viewport)
+                let isVisibleInViewport = !visibleRect.isNull && visibleRect.width > 1.0 && visibleRect.height > 1.0
+                if !isVisibleInViewport {
+                    targetFPS = offscreenDisplayFPS
+                } else if let window, isWorkspaceLikelyOccludedByOtherWindow(frameInGrid: frameInGrid, window: window) {
+                    targetFPS = offscreenDisplayFPS
+                } else {
+                    targetFPS = effectiveVisibleDisplayFPS(
+                        visibleRect: visibleRect,
+                        viewportArea: viewportArea,
+                        interactionUnlockForDisplay: interactionUnlockDisplayID == workspace.displayID
+                    )
+                }
+            } else {
+                targetFPS = offscreenDisplayFPS
+            }
+
+            return DisplayDescriptor(
+                displayID: workspace.displayID,
+                title: workspace.title,
+                pixelSize: workspace.displayPixelSize,
+                kind: workspace.kind,
+                maxFPS: targetFPS
+            )
+        }
+    }
+
+    private func effectiveVisibleDisplayFPS(
+        visibleRect: CGRect?,
+        viewportArea: CGFloat,
+        interactionUnlockForDisplay: Bool
+    ) -> Double {
+        var fps = clampedFPSLimit(fpsLimitValue)
+        if unlockFPSIfInteractingEnabled, interactionUnlockForDisplay {
+            fps = max(fps, defaultVisibleDisplayFPS)
+        }
+        if shouldUnlockFPSForVisibleCoverage(visibleRect: visibleRect, viewportArea: viewportArea) {
+            fps = max(fps, defaultVisibleDisplayFPS)
+        }
+        return fps
+    }
+
+    private func interactingDisplayIDFromMouse() -> CGDirectDisplayID? {
+        guard unlockFPSIfInteractingEnabled else { return nil }
+        return workspaceUnderCurrentMouseDisplay()?.displayID
+    }
+
+    private func shouldUnlockFPSForVisibleCoverage(visibleRect: CGRect?, viewportArea: CGFloat) -> Bool {
+        guard unlockFPSIfLargerThanPercentEnabled else { return false }
+        guard let visibleRect, !visibleRect.isNull else { return false }
+        guard viewportArea > 1.0 else { return false }
+        let coverage = max(0.0, min(100.0, (visibleRect.width * visibleRect.height) / viewportArea * 100.0))
+        return coverage >= unlockFPSLargerThanPercentThreshold
+    }
+
+    private func clampedFPSLimit(_ value: Double) -> Double {
+        guard value.isFinite else { return defaultVisibleDisplayFPS }
+        return min(120.0, max(1.0, value))
+    }
+
+    private func clampedFPSUnlockCoverageThreshold(_ value: Double) -> Double {
+        guard value.isFinite else { return 70.0 }
+        return min(100.0, max(1.0, value))
+    }
+
+    private func isOrcvWindowVisibleForCapture() -> Bool {
+        guard let window = view.window else { return true }
+        guard window.isVisible else { return false }
+        return window.occlusionState.contains(.visible)
+    }
+
+    private func isWorkspaceLikelyOccludedByOtherWindow(frameInGrid: CGRect, window: NSWindow) -> Bool {
+        guard frameInGrid.width > 1.0, frameInGrid.height > 1.0 else { return false }
+        let sampleInGrid = CGPoint(x: frameInGrid.midX, y: frameInGrid.midY)
+        let sampleInWindow = gridView.convert(sampleInGrid, to: nil)
+        let sampleInScreen = window.convertPoint(toScreen: sampleInWindow)
+        let topWindowNumber = NSWindow.windowNumber(at: sampleInScreen, belowWindowWithWindowNumber: 0)
+        guard topWindowNumber > 0 else { return false }
+        return topWindowNumber != window.windowNumber
+    }
+
+    private func displayDescriptorSignature(_ descriptors: [DisplayDescriptor]) -> UInt64 {
+        var hasher = Hasher()
+        hasher.combine(descriptors.count)
+        for descriptor in descriptors {
+            hasher.combine(Int(descriptor.displayID))
+            hasher.combine(Int(descriptor.pixelSize.width.rounded()))
+            hasher.combine(Int(descriptor.pixelSize.height.rounded()))
+            hasher.combine(Int((descriptor.maxFPS * 100.0).rounded()))
+        }
+        let signed = Int64(hasher.finalize())
+        return UInt64(bitPattern: signed)
+    }
+
+    private func refreshDisplayStreams(force: Bool = false) {
+        guard hasScreenCaptureAccess else { return }
+        let descriptors = currentDisplayDescriptors()
+        let signature = displayDescriptorSignature(descriptors)
+        if !force, signature == lastDisplayDescriptorSignature {
+            return
+        }
+        lastDisplayDescriptorSignature = signature
+        streamManager.configureStreams(for: descriptors)
+    }
+
+    private func scheduleDisplayStreamRefresh(immediate: Bool = false, force: Bool = false) {
+        guard hasScreenCaptureAccess else { return }
+        streamRefreshWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.refreshDisplayStreams(force: force)
+        }
+        streamRefreshWorkItem = workItem
+        if immediate {
+            DispatchQueue.main.async(execute: workItem)
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: workItem)
         }
     }
 
@@ -688,6 +914,20 @@ final class WorkspaceRootViewController: NSViewController {
         restoreWindowFrameOnSavepointRecallEnabled
     }
 
+    func menuToggleRequireHoldingMoveShortcut() {
+        requireHoldingMoveShortcutEnabled.toggle()
+        if requireHoldingMoveShortcutEnabled {
+            setWindowFollowToggleActive(false)
+        } else {
+            updateSpaceFollowWindowIfNeeded()
+        }
+        scheduleStateSave()
+    }
+
+    func menuRequireHoldingMoveShortcutEnabled() -> Bool {
+        requireHoldingMoveShortcutEnabled
+    }
+
     func menuToggleSwapResizeBehavior() {
         swapResizeBehaviorEnabled.toggle()
     }
@@ -731,6 +971,36 @@ final class WorkspaceRootViewController: NSViewController {
         if let mode = autoArrangeMode {
             performArrange(mode)
         }
+        scheduleStateSave()
+    }
+
+    func menuLimitFPSValue() -> Double {
+        fpsLimitValue
+    }
+
+    func menuUnlockFPSIfInteractingEnabled() -> Bool {
+        unlockFPSIfInteractingEnabled
+    }
+
+    func menuUnlockFPSIfLargerThanPercentEnabled() -> Bool {
+        unlockFPSIfLargerThanPercentEnabled
+    }
+
+    func menuUnlockFPSLargerThanPercentThreshold() -> Double {
+        unlockFPSLargerThanPercentThreshold
+    }
+
+    func menuSetLimitFPSSettings(
+        limitFPS: Double,
+        unlockIfInteracting: Bool,
+        unlockIfLargerThanPercent: Bool,
+        unlockIfLargerThresholdPercent: Double
+    ) {
+        fpsLimitValue = clampedFPSLimit(limitFPS)
+        unlockFPSIfInteractingEnabled = unlockIfInteracting
+        unlockFPSIfLargerThanPercentEnabled = unlockIfLargerThanPercent
+        unlockFPSLargerThanPercentThreshold = clampedFPSUnlockCoverageThreshold(unlockIfLargerThresholdPercent)
+        scheduleDisplayStreamRefresh(immediate: true, force: true)
         scheduleStateSave()
     }
 
@@ -845,7 +1115,7 @@ final class WorkspaceRootViewController: NSViewController {
         }
 
         let created = workspaceStore.addWorkspace(from: descriptor, tileSize: tileSize, at: index)
-        streamManager.configureStreams(for: currentDisplayDescriptors())
+        scheduleDisplayStreamRefresh(immediate: true, force: true)
         scheduleArrangementSync()
         return created
     }
@@ -862,7 +1132,7 @@ final class WorkspaceRootViewController: NSViewController {
         guard let removed = workspaceStore.removeWorkspace(id: workspaceID) else {
             return nil
         }
-        streamManager.configureStreams(for: currentDisplayDescriptors())
+        scheduleDisplayStreamRefresh(immediate: true, force: true)
         scheduleArrangementSync()
         return removed
     }
@@ -1271,6 +1541,7 @@ final class WorkspaceRootViewController: NSViewController {
         gridView.cameraOrigin = newOrigin
         lastCanvasCamera = currentCanvasCameraState() ?? lastCanvasCamera
         scheduleCanvasCameraSaveDebounced()
+        scheduleDisplayStreamRefresh()
         return true
     }
 
@@ -1288,6 +1559,7 @@ final class WorkspaceRootViewController: NSViewController {
         )
         lastCanvasCamera = currentCanvasCameraState() ?? lastCanvasCamera
         scheduleCanvasCameraSaveDebounced()
+        scheduleDisplayStreamRefresh()
         return true
     }
 
@@ -1295,6 +1567,9 @@ final class WorkspaceRootViewController: NSViewController {
         guard windowLevelPollingTimer == nil else { return }
         let timer = Timer(timeInterval: 0.12, repeats: true) { [weak self] _ in
             self?.refreshGridWindowLevelForPointerMapping()
+            if self?.unlockFPSIfInteractingEnabled == true {
+                self?.scheduleDisplayStreamRefresh()
+            }
         }
         RunLoop.main.add(timer, forMode: .common)
         windowLevelPollingTimer = timer
@@ -1323,21 +1598,26 @@ final class WorkspaceRootViewController: NSViewController {
         spaceFollowWindowTimer?.invalidate()
         spaceFollowWindowTimer = nil
         lastSpaceFollowMouseScreenPoint = nil
+        setMoveCursorActive(false)
     }
 
     private func updateSpaceFollowWindowIfNeeded() {
         guard let window = view.window, window.isVisible else {
             lastSpaceFollowMouseScreenPoint = nil
+            setMoveCursorActive(false)
             return
         }
         guard !previewWindowController.isPresenting else {
             lastSpaceFollowMouseScreenPoint = nil
+            setMoveCursorActive(false)
             return
         }
 
         let mouseInScreen = NSEvent.mouseLocation
         let pointerDirectlyOverWindow = isPointerDirectlyOverWindow(window: window, screenPoint: mouseInScreen)
-        let canFollow = shortcutManager.isWindowFollowShortcutActive() && pointerDirectlyOverWindow
+        let followShortcutActive = isWindowFollowShortcutActive()
+        let canFollow = followShortcutActive && pointerDirectlyOverWindow
+        setMoveCursorActive(followShortcutActive)
 
         guard canFollow else {
             lastSpaceFollowMouseScreenPoint = nil
@@ -1353,6 +1633,38 @@ final class WorkspaceRootViewController: NSViewController {
             }
         }
         lastSpaceFollowMouseScreenPoint = mouseInScreen
+    }
+
+    private func isWindowFollowShortcutActive() -> Bool {
+        if requireHoldingMoveShortcutEnabled {
+            return shortcutManager.isWindowFollowShortcutActive()
+        }
+        return windowFollowToggleActive
+    }
+
+    private func setWindowFollowToggleActive(_ active: Bool) {
+        guard windowFollowToggleActive != active else { return }
+        windowFollowToggleActive = active
+        if !active {
+            lastSpaceFollowMouseScreenPoint = nil
+        }
+        updateSpaceFollowWindowIfNeeded()
+    }
+
+    private func setMoveCursorActive(_ active: Bool) {
+        if active {
+            if !moveCursorActive {
+                moveCursorActive = true
+                NSCursor.openHand.push()
+            } else {
+                // Reassert cursor; AppKit can reset it during mouse-move handling.
+                NSCursor.openHand.set()
+            }
+        } else {
+            guard moveCursorActive else { return }
+            moveCursorActive = false
+            NSCursor.pop()
+        }
     }
 
     private func isPointerDirectlyOverWindow(window: NSWindow, screenPoint: CGPoint) -> Bool {
@@ -1415,9 +1727,6 @@ final class WorkspaceRootViewController: NSViewController {
     private func handleNavigationEvent(_ event: NSEvent) -> Bool {
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let shortcutMods = mods.intersection([.control, .option, .command, .shift])
-        if event.type == .keyDown, event.keyCode == 49, isOrcvWindowFocused() {
-            return true
-        }
         if event.type == .keyDown {
             if let slot = digitSlotForNavigationEvent(event) {
                 if shortcutManager.matchesJumpToSlotModifier(shortcutMods), (1...9).contains(slot) {
@@ -1438,7 +1747,11 @@ final class WorkspaceRootViewController: NSViewController {
             }
         }
 
-        guard let action = shortcutManager.action(for: event) else { return false }
+        let action = shortcutManager.action(for: event)
+        if event.type == .keyDown, event.keyCode == 49, isOrcvWindowFocused(), action == nil {
+            return true
+        }
+        guard let action else { return false }
         let windowFocused = isOrcvWindowFocused()
         if actionRequiresFocusedWindow(action), !windowFocused {
             return false
@@ -1469,6 +1782,11 @@ final class WorkspaceRootViewController: NSViewController {
             menuJumpPreviousDisplay()
             return true
         case .windowFollowHold:
+            if requireHoldingMoveShortcutEnabled {
+                return true
+            }
+            guard isPointerWithinOrcvWindowBounds() || isOrcvWindowFocused() else { return false }
+            setWindowFollowToggleActive(!windowFollowToggleActive)
             return true
         case .deselectTile:
             menuDeselectTile()
@@ -1920,7 +2238,7 @@ final class WorkspaceRootViewController: NSViewController {
             return
         }
 
-        streamManager.configureStreams(for: currentDisplayDescriptors())
+        scheduleDisplayStreamRefresh(immediate: true, force: true)
         scheduleArrangementSync()
     }
 
@@ -1953,6 +2271,7 @@ final class WorkspaceRootViewController: NSViewController {
         let targetOrigin = gridView.canvasInitialViewportOrigin(for: viewportSize)
         gridView.cameraOrigin = targetOrigin
         if let camera = currentCanvasCameraState() { lastCanvasCamera = camera }
+        scheduleDisplayStreamRefresh()
     }
 
     private func currentCanvasCameraState() -> CanvasCameraState? {
@@ -1970,6 +2289,7 @@ final class WorkspaceRootViewController: NSViewController {
         gridView.cameraMagnification = clampedMag
         gridView.cameraOrigin = camera.origin
         lastCanvasCamera = CanvasCameraState(magnification: clampedMag, origin: camera.origin)
+        scheduleDisplayStreamRefresh()
     }
 
     private func jumpToDisplaySlot(_ slot: Int) -> Bool {
@@ -2605,6 +2925,11 @@ final class WorkspaceRootViewController: NSViewController {
             arrangePadding: Double(arrangePadding),
             autoArrangeModeRawValue: autoArrangeMode?.rawValue,
             sharpCorners: gridView.sharpCornersEnabled ? true : nil,
+            requireHoldingMoveShortcut: requireHoldingMoveShortcutEnabled ? true : nil,
+            limitFPS: fpsLimitValue,
+            unlockFPSIfInteracting: unlockFPSIfInteractingEnabled,
+            unlockFPSIfLargerThanPercent: unlockFPSIfLargerThanPercentEnabled,
+            unlockFPSLargerThanPercentThreshold: unlockFPSLargerThanPercentThreshold,
             workspaces: entries
         )
     }
@@ -2618,6 +2943,11 @@ final class WorkspaceRootViewController: NSViewController {
         let arrangePadding: CGFloat?
         let autoArrangeMode: ArrangeMode?
         let sharpCorners: Bool
+        let requireHoldingMoveShortcut: Bool
+        let limitFPS: Double
+        let unlockFPSIfInteracting: Bool
+        let unlockFPSIfLargerThanPercent: Bool
+        let unlockFPSLargerThanPercentThreshold: Double
     }
 
     private func buildBootstrapState() -> BootstrapState {
@@ -2632,7 +2962,12 @@ final class WorkspaceRootViewController: NSViewController {
                 canvasSavepoints: [:],
                 arrangePadding: nil,
                 autoArrangeMode: nil,
-                sharpCorners: false
+                sharpCorners: false,
+                requireHoldingMoveShortcut: false,
+                limitFPS: 60.0,
+                unlockFPSIfInteracting: true,
+                unlockFPSIfLargerThanPercent: false,
+                unlockFPSLargerThanPercentThreshold: 70.0
             )
         }
         let profile = displayManager.mainDisplayProfile()
@@ -2693,7 +3028,14 @@ final class WorkspaceRootViewController: NSViewController {
             ),
             arrangePadding: persisted.arrangePadding.map { CGFloat($0) },
             autoArrangeMode: persisted.autoArrangeModeRawValue.flatMap { ArrangeMode(rawValue: $0) },
-            sharpCorners: persisted.sharpCorners ?? false
+            sharpCorners: persisted.sharpCorners ?? false,
+            requireHoldingMoveShortcut: persisted.requireHoldingMoveShortcut ?? false,
+            limitFPS: clampedFPSLimit(persisted.limitFPS ?? 60.0),
+            unlockFPSIfInteracting: persisted.unlockFPSIfInteracting ?? true,
+            unlockFPSIfLargerThanPercent: persisted.unlockFPSIfLargerThanPercent ?? false,
+            unlockFPSLargerThanPercentThreshold: clampedFPSUnlockCoverageThreshold(
+                persisted.unlockFPSLargerThanPercentThreshold ?? 70.0
+            )
         )
     }
 
@@ -2736,6 +3078,7 @@ final class WorkspaceRootViewController: NSViewController {
             y: worldCenter.y - viewportSize.height / 2.0
         )
         lastCanvasCamera = currentCanvasCameraState() ?? lastCanvasCamera
+        scheduleDisplayStreamRefresh()
         scheduleStateSave()
     }
 
@@ -2746,6 +3089,7 @@ final class WorkspaceRootViewController: NSViewController {
         let target = gridView.canvasViewportOriginForWorldOrigin(viewportSize: viewport)
         gridView.cameraOrigin = target
         lastCanvasCamera = currentCanvasCameraState() ?? lastCanvasCamera
+        scheduleDisplayStreamRefresh()
         scheduleStateSave()
     }
 
@@ -2763,6 +3107,14 @@ final class WorkspaceRootViewController: NSViewController {
         if let padding = bootstrap.arrangePadding { arrangePadding = padding }
         autoArrangeMode = bootstrap.autoArrangeMode
         gridView.sharpCornersEnabled = bootstrap.sharpCorners
+        requireHoldingMoveShortcutEnabled = bootstrap.requireHoldingMoveShortcut
+        fpsLimitValue = clampedFPSLimit(bootstrap.limitFPS)
+        unlockFPSIfInteractingEnabled = bootstrap.unlockFPSIfInteracting
+        unlockFPSIfLargerThanPercentEnabled = bootstrap.unlockFPSIfLargerThanPercent
+        unlockFPSLargerThanPercentThreshold = clampedFPSUnlockCoverageThreshold(bootstrap.unlockFPSLargerThanPercentThreshold)
+        if requireHoldingMoveShortcutEnabled {
+            setWindowFollowToggleActive(false)
+        }
         gridView.layoutMode = .canvas
         applyInteractionMode()
         workspaceStore.normalizeTileSizesForCurrentDisplays()
@@ -2770,7 +3122,7 @@ final class WorkspaceRootViewController: NSViewController {
         isRestoringState = false
 
         if hasScreenCaptureAccess {
-            streamManager.configureStreams(for: currentDisplayDescriptors())
+            scheduleDisplayStreamRefresh(immediate: true, force: true)
         } else {
             setTileStatus("Screen Recording permission required for live display previews.")
         }
