@@ -21,12 +21,13 @@ jobs:
 
       - name: Resolve version
         run: |
-          if [ -n "${{ env.VERSION }}" ]; then
-            echo "VERSION=${{ env.VERSION }}" >> "$GITHUB_ENV"
+          if [ -n "${{ github.event.inputs.version || '' }}" ]; then
+            echo "VERSION=${{ github.event.inputs.version }}" >> "$GITHUB_ENV"
           else
             # Strip leading "v" from the tag name.
             echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
           fi
+          echo "BUILD_NUMBER=${{ github.run_number }}" >> "$GITHUB_ENV"
 
       - name: Select Xcode
         uses: maxim-lobanov/setup-xcode@v1
@@ -81,6 +82,10 @@ jobs:
             -scheme orcv \
             -configuration Release \
             -derivedDataPath build/DerivedData \
+            MARKETING_VERSION="${{ env.VERSION }}" \
+            CURRENT_PROJECT_VERSION="${{ env.BUILD_NUMBER }}" \
+            INFOPLIST_KEY_CFBundleShortVersionString="${{ env.VERSION }}" \
+            INFOPLIST_KEY_CFBundleVersion="${{ env.BUILD_NUMBER }}" \
             CODE_SIGNING_ALLOWED=YES \
             CODE_SIGNING_REQUIRED=YES \
             CODE_SIGN_STYLE=Manual \
