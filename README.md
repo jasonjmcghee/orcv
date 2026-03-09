@@ -4,9 +4,9 @@ _if `tmux` was built for window management on macos in 2026_
 
 orcv (ork-vee) is a macos app that lets you create virtual displays in an infinite canvas (zoom/pan), arrange them, create "savepoints" and rapidly jump between them, teleport windows or your mouse to or from them, or fullscreen one, all in a picture-in-picture style overlay you can keep on your main display.
 
-_These are real / recognized displays by macos, which are automatically arranged based on how you arrange them in the canvas, just like if you had a bunch of monitors on your desk. I tend to use 2, but here is 9 for fun - your performance may vary._
+_These are real / recognized displays by macos, which are automatically arranged based on how you arrange them in the canvas, just like if you had a bunch of monitors on your desk._
 
-<img width="900" height="585" alt="Screenshot 2026-03-02 at 5 58 36 AM" src="https://github.com/user-attachments/assets/3040e9ac-2c7c-4fee-86aa-68607558eafb" />
+https://github.com/user-attachments/assets/1e0b0ba8-7735-436d-a51f-def814ebdaf7
 
 In today's world, long-running tasks that you have to manage have visual aspects. That doesn't work well with the terminal. tmux and Zellij and friends have a lot of great attributes, but I had yet to use something that checked all my boxes.
 
@@ -15,10 +15,6 @@ The first version of this came together pretty quickly, but I've spent more time
 It's built it in a way that it's mean to be cheap to render your many desktops, but any and all ideas to improve performance are very welcome.
 
 I encourage you to just, try it out to get a feel for it.
-
-# Demo
-
-https://github.com/user-attachments/assets/1e0b0ba8-7735-436d-a51f-def814ebdaf7
 
 # Features
 
