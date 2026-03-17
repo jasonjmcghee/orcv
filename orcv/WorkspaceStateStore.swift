@@ -13,6 +13,7 @@ struct PersistedWorkspaceState: Codable {
         var referenceTileIndex: Int?
         var tileOffsetX: Double?
         var tileOffsetY: Double?
+        var seamlessMode: Bool?
     }
 
     struct WorkspaceEntry: Codable {
@@ -35,10 +36,22 @@ struct PersistedWorkspaceState: Codable {
     var canvasMagnification: Double?
     var canvasOffsetX: Double?
     var canvasOffsetY: Double?
+    var windowX: Double?
+    var windowY: Double?
+    var windowWidth: Double?
+    var windowHeight: Double?
+    var windowedRestoreX: Double?
+    var windowedRestoreY: Double?
+    var windowedRestoreWidth: Double?
+    var windowedRestoreHeight: Double?
+    var windowedRestoreCanvasMagnification: Double?
+    var windowedRestoreCanvasOffsetX: Double?
+    var windowedRestoreCanvasOffsetY: Double?
     var canvasSavepoints: [String: CameraBookmark]?
     var arrangePadding: Double?
     var autoArrangeModeRawValue: String?
     var sharpCorners: Bool?
+    var seamlessMode: Bool?
     var requireHoldingMoveShortcut: Bool?
     var limitFPS: Double?
     var unlockFPSIfInteracting: Bool?

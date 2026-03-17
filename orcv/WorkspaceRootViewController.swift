@@ -2,6 +2,8 @@ import AppKit
 import CoreGraphics
 import Foundation
 import IOSurface
+import Metal
+import MetalKit
 
 final class WorkspaceRootViewController: NSViewController {
     private struct CanvasCameraState {
@@ -19,6 +21,7 @@ final class WorkspaceRootViewController: NSViewController {
         let windowFrame: CGRect?
         let referenceTileID: UUID?
         let cameraOffsetFromTile: CGPoint?
+        let seamlessModeEnabled: Bool
     }
 
     private enum ShiftPanAxisLock {
@@ -46,6 +49,7 @@ final class WorkspaceRootViewController: NSViewController {
     private let tileStatusLabel = NSTextField(labelWithString: "")
     private let toastContainer = NSView(frame: .zero)
     private let toastLabel = NSTextField(labelWithString: "")
+    private let seamlessFocusBorderView = FocusLockBorderView(frame: .zero)
     private var toastDismissWorkItem: DispatchWorkItem?
     private let emptyStateLabel = NSTextField(wrappingLabelWithString: "")
     private let actionUndoManager = UndoManager()
@@ -57,6 +61,8 @@ final class WorkspaceRootViewController: NSViewController {
     private var globalCanvasScrollMonitor: Any?
     private var localMagnifyMonitor: Any?
     private var globalMagnifyMonitor: Any?
+    private var localMouseMovementMonitor: Any?
+    private var globalMouseMovementMonitor: Any?
     private var canvasCameraSaveDebounceWorkItem: DispatchWorkItem?
     private var defaultNotificationObservers: [NSObjectProtocol] = []
     private var workspaceNotificationObservers: [NSObjectProtocol] = []
@@ -83,6 +89,8 @@ final class WorkspaceRootViewController: NSViewController {
     private var isRestoringState = false
     private var isMaterializingCanvasOrigins = false
     private var lastObservedWindowFrame: CGRect?
+    private var seamlessRestoreWindowFrame: CGRect?
+    private var seamlessRestoreCamera: CanvasCameraState?
     private var liveResizeStartCanvasCamera: CanvasCameraState?
     private var isAdjustingCameraForWindowResize = false
     private var suppressProgrammaticWindowResizeCameraAdjustment = false
@@ -98,6 +106,9 @@ final class WorkspaceRootViewController: NSViewController {
     private var centerTileOnJumpEnabled = false
     private var preserveSizeOnSlotJumpEnabled = false
     private var restoreWindowFrameOnSavepointRecallEnabled = true
+    private var sharpCornersPreferenceEnabled = false
+    private var seamlessModeEnabled = false
+    private var seamlessFocusLockEnabled = false
     private var requireHoldingMoveShortcutEnabled = false
     private var swapResizeBehaviorEnabled = false
     private var windowFollowToggleActive = false
@@ -122,6 +133,7 @@ final class WorkspaceRootViewController: NSViewController {
     private let maxCameraHistoryEntries = 1000
 
     var onInitialBootstrapComplete: (() -> Void)?
+    var onWindowPresentationChange: (() -> Void)?
 
     init(
         displayManager: VirtualDisplayManager,
@@ -129,7 +141,9 @@ final class WorkspaceRootViewController: NSViewController {
         pointerRouter: PointerRouter,
         shortcutManager: ShortcutManager,
         stateStore: WorkspaceStateStore,
-        hasScreenCaptureAccess: Bool
+        hasScreenCaptureAccess: Bool,
+        initialSharpCornersEnabled: Bool = false,
+        initialSeamlessModeEnabled: Bool = false
     ) {
         self.displayManager = displayManager
         self.workspaceStore = workspaceStore
@@ -137,6 +151,8 @@ final class WorkspaceRootViewController: NSViewController {
         self.shortcutManager = shortcutManager
         self.stateStore = stateStore
         self.hasScreenCaptureAccess = hasScreenCaptureAccess
+        self.sharpCornersPreferenceEnabled = initialSharpCornersEnabled
+        self.seamlessModeEnabled = initialSeamlessModeEnabled
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -162,6 +178,12 @@ final class WorkspaceRootViewController: NSViewController {
         }
         if let globalMagnifyMonitor {
             NSEvent.removeMonitor(globalMagnifyMonitor)
+        }
+        if let localMouseMovementMonitor {
+            NSEvent.removeMonitor(localMouseMovementMonitor)
+        }
+        if let globalMouseMovementMonitor {
+            NSEvent.removeMonitor(globalMouseMovementMonitor)
         }
         canvasCameraSaveDebounceWorkItem?.cancel()
         streamRefreshWorkItem?.cancel()
@@ -191,7 +213,9 @@ final class WorkspaceRootViewController: NSViewController {
         installStreamVisibilityObserversIfNeeded()
         installWindowLevelMonitorIfNeeded()
         installSpaceFollowWindowMonitorIfNeeded()
+        installMouseMovementMonitorIfNeeded()
         refreshGridWindowLevelForPointerMapping()
+        updateSeamlessMousePassthroughIfNeeded()
     }
 
     override func viewWillDisappear() {
@@ -200,6 +224,7 @@ final class WorkspaceRootViewController: NSViewController {
         teardownStreamVisibilityObservers()
         teardownWindowLevelMonitor()
         teardownSpaceFollowWindowMonitor()
+        view.window?.ignoresMouseEvents = false
     }
 
     override func viewDidLayout() {
@@ -207,6 +232,7 @@ final class WorkspaceRootViewController: NSViewController {
         adjustCanvasCameraForWindowResizeIfNeeded()
         updateEmptyStateCallout()
         layoutGridDocumentView()
+        updateSeamlessMousePassthroughIfNeeded()
         scheduleDisplayStreamRefresh()
         flushPendingArrangementSyncAfterLiveResizeIfNeeded()
     }
@@ -259,7 +285,11 @@ final class WorkspaceRootViewController: NSViewController {
         toastLabel.maximumNumberOfLines = 0
         toastContainer.addSubview(toastLabel)
 
+        seamlessFocusBorderView.translatesAutoresizingMaskIntoConstraints = false
+        seamlessFocusBorderView.isHidden = true
+
         view.addSubview(canvasBackdropView)
+        view.addSubview(seamlessFocusBorderView)
         view.addSubview(gridView)
         view.addSubview(emptyStateLabel)
         view.addSubview(tileStatusOverlay)
@@ -298,6 +328,11 @@ final class WorkspaceRootViewController: NSViewController {
             toastLabel.bottomAnchor.constraint(equalTo: toastContainer.bottomAnchor, constant: -16),
             toastLabel.leadingAnchor.constraint(equalTo: toastContainer.leadingAnchor, constant: 24),
             toastLabel.trailingAnchor.constraint(equalTo: toastContainer.trailingAnchor, constant: -24),
+
+            seamlessFocusBorderView.topAnchor.constraint(equalTo: view.topAnchor),
+            seamlessFocusBorderView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            seamlessFocusBorderView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            seamlessFocusBorderView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
 
         applyInteractionMode()
@@ -321,6 +356,9 @@ final class WorkspaceRootViewController: NSViewController {
             guard let self else { return }
             _ = pointInTile
             _ = frameInGrid
+            if self.consumeSeamlessFocusLockClick() {
+                return
+            }
             if modifiers.contains(.command) || modifiers.contains(.shift) {
                 self.workspaceStore.toggleSelection(workspaceID: workspaceID)
             } else {
@@ -329,10 +367,16 @@ final class WorkspaceRootViewController: NSViewController {
         }
 
         gridView.onBackgroundClick = { [weak self] in
+            if self?.consumeSeamlessFocusLockClick() == true {
+                return
+            }
             self?.workspaceStore.clearSelection()
         }
         gridView.onBackgroundWindowDragRequest = { [weak self] event in
             guard let self, let window = self.view.window else { return }
+            if self.consumeSeamlessFocusLockClick() {
+                return
+            }
             if !self.isOrcvWindowFocused() {
                 NSApp.activate(ignoringOtherApps: true)
             }
@@ -411,6 +455,7 @@ final class WorkspaceRootViewController: NSViewController {
         gridView.selectedWorkspaceIDs = workspaceStore.selectedWorkspaceIDs
         layoutGridDocumentView()
         materializeUnpositionedCanvasOriginsIfNeeded()
+        updateSeamlessMousePassthroughIfNeeded()
 
         let validDisplayIDs = Set(workspaceStore.workspaces.map(\.displayID))
         previewWindowController.closeIfDisplayMissing(validDisplayIDs: validDisplayIDs)
@@ -562,12 +607,102 @@ final class WorkspaceRootViewController: NSViewController {
         }
         guard !isAdjustingCameraForWindowResize else { return }
 
-        let oldMagnification = max(0.01, gridView.cameraMagnification)
-        var newMagnification = oldMagnification
         let modifierActive = shortcutManager.isScalingResizeModifierActive()
         let shouldStretchWithResize = swapResizeBehaviorEnabled ? modifierActive : !modifierActive
-        if shouldStretchWithResize, oldSize.width > 1.0, newSize.width > 1.0 {
-            // Stretch-resize keeps world-width-in-view stable, so tiles appear to scale with the window.
+        guard let adjustedCamera = adjustedCanvasCamera(
+            from: oldFrame,
+            to: newFrame,
+            stretchWithResize: shouldStretchWithResize
+        ) else { return }
+        let oldMagnification = max(0.01, gridView.cameraMagnification)
+        let oldOrigin = gridView.cameraOrigin
+        let newMagnification = adjustedCamera.magnification
+        let newOrigin = adjustedCamera.origin
+
+        guard abs(newOrigin.x - oldOrigin.x) > 0.0001
+            || abs(newOrigin.y - oldOrigin.y) > 0.0001
+            || abs(newMagnification - oldMagnification) > 0.0001 else {
+            return
+        }
+
+        isAdjustingCameraForWindowResize = true
+        if abs(newMagnification - oldMagnification) > 0.0001 {
+            gridView.cameraMagnification = newMagnification
+        }
+        gridView.cameraOrigin = newOrigin
+        lastCanvasCamera = currentCanvasCameraState() ?? lastCanvasCamera
+        scheduleCanvasCameraSaveDebounced()
+        isAdjustingCameraForWindowResize = false
+    }
+
+    func applyWindowFramePreservingCanvas(_ targetFrame: CGRect, stretchWithResize: Bool = true) {
+        guard let window = view.window else { return }
+        let oldFrame = window.frame
+        let targetCamera = adjustedCanvasCamera(
+            from: oldFrame,
+            to: targetFrame,
+            stretchWithResize: stretchWithResize
+        )
+
+        suppressWindowResizeUndoRegistration = true
+        suppressProgrammaticWindowResizeCameraAdjustment = true
+        window.setFrame(targetFrame, display: true, animate: false)
+        lastObservedWindowFrame = targetFrame
+        if let targetCamera {
+            applyCanvasCamera(targetCamera)
+            scheduleCanvasCameraSaveDebounced()
+        }
+        suppressProgrammaticWindowResizeCameraAdjustment = false
+        suppressWindowResizeUndoRegistration = false
+    }
+
+    func applyWindowFramePreservingScreenProjection(_ targetFrame: CGRect) {
+        guard let window = view.window else { return }
+        let oldFrame = window.frame
+        let targetCamera = adjustedCanvasCameraPreservingScreenProjection(
+            from: oldFrame,
+            to: targetFrame
+        )
+
+        suppressWindowResizeUndoRegistration = true
+        suppressProgrammaticWindowResizeCameraAdjustment = true
+        window.setFrame(targetFrame, display: true, animate: false)
+        lastObservedWindowFrame = targetFrame
+        if let targetCamera {
+            applyCanvasCamera(targetCamera)
+            scheduleCanvasCameraSaveDebounced()
+        }
+        suppressProgrammaticWindowResizeCameraAdjustment = false
+        suppressWindowResizeUndoRegistration = false
+    }
+
+    func applyWindowFrameWithoutAdjustingCanvas(_ targetFrame: CGRect) {
+        guard let window = view.window else { return }
+        suppressWindowResizeUndoRegistration = true
+        suppressProgrammaticWindowResizeCameraAdjustment = true
+        window.setFrame(targetFrame, display: true, animate: false)
+        lastObservedWindowFrame = targetFrame
+        suppressProgrammaticWindowResizeCameraAdjustment = false
+        suppressWindowResizeUndoRegistration = false
+    }
+
+    private func adjustedCanvasCamera(
+        from oldFrame: CGRect,
+        to newFrame: CGRect,
+        stretchWithResize: Bool
+    ) -> CanvasCameraState? {
+        guard currentLayoutMode == .canvas else { return nil }
+        guard !workspaceStore.workspaces.isEmpty else { return nil }
+
+        let oldSize = oldFrame.size
+        let newSize = newFrame.size
+        guard abs(newSize.width - oldSize.width) > 0.01 || abs(newSize.height - oldSize.height) > 0.01 else {
+            return currentCanvasCameraState() ?? lastCanvasCamera
+        }
+
+        let oldMagnification = max(0.01, gridView.cameraMagnification)
+        var newMagnification = oldMagnification
+        if stretchWithResize, oldSize.width > 1.0, newSize.width > 1.0 {
             newMagnification = oldMagnification * (newSize.width / oldSize.width)
             newMagnification = max(minCanvasMagnification, min(maxCanvasMagnification, newMagnification))
         }
@@ -614,20 +749,25 @@ final class WorkspaceRootViewController: NSViewController {
             y: anchoredWorldPoint.y - newAnchorY / newMagnification
         )
 
-        guard abs(newOrigin.x - oldOrigin.x) > 0.0001
-            || abs(newOrigin.y - oldOrigin.y) > 0.0001
-            || abs(newMagnification - oldMagnification) > 0.0001 else {
-            return
-        }
+        return CanvasCameraState(magnification: newMagnification, origin: newOrigin)
+    }
 
-        isAdjustingCameraForWindowResize = true
-        if abs(newMagnification - oldMagnification) > 0.0001 {
-            gridView.cameraMagnification = newMagnification
-        }
-        gridView.cameraOrigin = newOrigin
-        lastCanvasCamera = currentCanvasCameraState() ?? lastCanvasCamera
-        scheduleCanvasCameraSaveDebounced()
-        isAdjustingCameraForWindowResize = false
+    private func adjustedCanvasCameraPreservingScreenProjection(
+        from oldFrame: CGRect,
+        to newFrame: CGRect
+    ) -> CanvasCameraState? {
+        guard currentLayoutMode == .canvas else { return nil }
+        guard !workspaceStore.workspaces.isEmpty else { return nil }
+
+        let magnification = max(0.01, gridView.cameraMagnification)
+        let oldOrigin = gridView.cameraOrigin
+        let deltaX = newFrame.minX - oldFrame.minX
+        let deltaY = newFrame.minY - oldFrame.minY
+        let newOrigin = CGPoint(
+            x: oldOrigin.x + deltaX / magnification,
+            y: oldOrigin.y + deltaY / magnification
+        )
+        return CanvasCameraState(magnification: magnification, origin: newOrigin)
     }
 
     @objc
@@ -937,13 +1077,57 @@ final class WorkspaceRootViewController: NSViewController {
     }
 
     func menuToggleSharpCorners() {
-        let enabled = !gridView.sharpCornersEnabled
-        gridView.sharpCornersEnabled = enabled
+        sharpCornersPreferenceEnabled.toggle()
+        applyWindowPresentationPreferences()
         scheduleStateSave()
     }
 
     func menuSharpCornersEnabled() -> Bool {
-        gridView.sharpCornersEnabled
+        sharpCornersPreferenceEnabled
+    }
+
+    func menuToggleSeamlessMode() {
+        setSeamlessModeEnabled(!seamlessModeEnabled)
+    }
+
+    func menuSeamlessModeEnabled() -> Bool {
+        seamlessModeEnabled
+    }
+
+    func setSeamlessRestoreWindowFrame(_ frame: CGRect?, scheduleSave: Bool = true) {
+        seamlessRestoreWindowFrame = frame
+        if scheduleSave {
+            scheduleStateSave()
+        }
+    }
+
+    func captureSeamlessRestoreSnapshot(scheduleSave: Bool = true) {
+        seamlessRestoreWindowFrame = view.window?.frame ?? lastObservedWindowFrame
+        seamlessRestoreCamera = currentCanvasCameraState() ?? lastCanvasCamera
+        if scheduleSave {
+            scheduleStateSave()
+        }
+    }
+
+    func applySeamlessRestoreSnapshot() {
+        if let frame = seamlessRestoreWindowFrame {
+            applyWindowFrameWithoutAdjustingCanvas(frame)
+        }
+        if let camera = seamlessRestoreCamera {
+            applyCanvasCamera(camera)
+            scheduleCanvasCameraSaveDebounced()
+        }
+    }
+
+    func seamlessFocusLockIsEnabled() -> Bool {
+        seamlessFocusLockEnabled
+    }
+
+    func setSeamlessFocusLockEnabled(_ enabled: Bool) {
+        let resolved = enabled && seamlessModeEnabled
+        guard seamlessFocusLockEnabled != resolved else { return }
+        seamlessFocusLockEnabled = resolved
+        applyWindowPresentationPreferences()
     }
 
     func menuArrange(_ mode: ArrangeMode) {
@@ -1061,6 +1245,11 @@ final class WorkspaceRootViewController: NSViewController {
             guard let self, let before = self.moveStartWindowFrame else { return }
             self.moveStartWindowFrame = nil
             let after = window.frame
+            self.lastObservedWindowFrame = after
+            if !self.seamlessModeEnabled {
+                self.seamlessRestoreWindowFrame = after
+                self.seamlessRestoreCamera = self.currentCanvasCameraState() ?? self.lastCanvasCamera
+            }
             guard self.windowFramesDiffer(before, after) else { return }
             let camera = self.currentCanvasCameraState() ?? self.lastCanvasCamera
             self.registerWindowResizeUndo(
@@ -1070,6 +1259,7 @@ final class WorkspaceRootViewController: NSViewController {
                 afterCamera: camera,
                 actionName: "Move Window"
             )
+            self.scheduleStateSave()
         }
         moveUndoWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
@@ -1093,6 +1283,12 @@ final class WorkspaceRootViewController: NSViewController {
             afterCamera: afterCamera,
             actionName: "Resize Window"
         )
+        lastObservedWindowFrame = after
+        if !seamlessModeEnabled {
+            seamlessRestoreWindowFrame = after
+            seamlessRestoreCamera = currentCanvasCameraState() ?? lastCanvasCamera
+        }
+        scheduleStateSave()
     }
 
     private struct DeletedWorkspaceSnapshot {
@@ -1426,10 +1622,27 @@ final class WorkspaceRootViewController: NSViewController {
         }
     }
 
+    private func installMouseMovementMonitorIfNeeded() {
+        let events: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
+        if localMouseMovementMonitor == nil {
+            localMouseMovementMonitor = NSEvent.addLocalMonitorForEvents(matching: events) { [weak self] event in
+                self?.updateSeamlessMousePassthroughIfNeeded()
+                return event
+            }
+        }
+        guard globalMouseMovementMonitor == nil else { return }
+        globalMouseMovementMonitor = NSEvent.addGlobalMonitorForEvents(matching: events) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.updateSeamlessMousePassthroughIfNeeded()
+            }
+        }
+    }
+
     @discardableResult
     private func handleCanvasMagnify(_ event: NSEvent, requireUnfocusedWindow: Bool) -> Bool {
         guard currentLayoutMode == .canvas else { return false }
         guard !workspaceStore.workspaces.isEmpty else { return false }
+        guard canInteractWithCanvasNavigation() else { return false }
         guard let window = view.window, window.isVisible else { return false }
         if requireUnfocusedWindow, isOrcvWindowFocused() {
             return false
@@ -1451,6 +1664,7 @@ final class WorkspaceRootViewController: NSViewController {
     private func handleCanvasScrollEvent(_ event: NSEvent, requireUnfocusedWindow: Bool) -> Bool {
         guard currentLayoutMode == .canvas else { return false }
         guard !workspaceStore.workspaces.isEmpty else { return false }
+        guard canInteractWithCanvasNavigation() else { return false }
         guard let window = view.window, window.isVisible else { return false }
         if requireUnfocusedWindow, isOrcvWindowFocused() {
             return false
@@ -1521,6 +1735,7 @@ final class WorkspaceRootViewController: NSViewController {
     @discardableResult
     private func applyCanvasZoom(magnificationDelta: CGFloat, anchorViewPoint: CGPoint) -> Bool {
         guard currentLayoutMode == .canvas else { return false }
+        guard canInteractWithCanvasNavigation() else { return false }
         guard magnificationDelta.isFinite, abs(magnificationDelta) > 0.00001 else { return false }
 
         let currentMag = gridView.cameraMagnification
@@ -1548,6 +1763,7 @@ final class WorkspaceRootViewController: NSViewController {
     @discardableResult
     private func applyCanvasPan(deltaX: CGFloat, deltaY: CGFloat) -> Bool {
         guard currentLayoutMode == .canvas else { return false }
+        guard canInteractWithCanvasNavigation() else { return false }
         guard deltaX.isFinite, deltaY.isFinite else { return false }
         let scale = max(0.01, gridView.cameraMagnification)
         let worldDelta = CGPoint(x: deltaX / scale, y: deltaY / scale)
@@ -1561,6 +1777,10 @@ final class WorkspaceRootViewController: NSViewController {
         scheduleCanvasCameraSaveDebounced()
         scheduleDisplayStreamRefresh()
         return true
+    }
+
+    private func canInteractWithCanvasNavigation() -> Bool {
+        !seamlessModeEnabled || seamlessFocusLockEnabled
     }
 
     private func installWindowLevelMonitorIfNeeded() {
@@ -1603,6 +1823,11 @@ final class WorkspaceRootViewController: NSViewController {
 
     private func updateSpaceFollowWindowIfNeeded() {
         guard let window = view.window, window.isVisible else {
+            lastSpaceFollowMouseScreenPoint = nil
+            setMoveCursorActive(false)
+            return
+        }
+        if seamlessModeEnabled {
             lastSpaceFollowMouseScreenPoint = nil
             setMoveCursorActive(false)
             return
@@ -1690,6 +1915,11 @@ final class WorkspaceRootViewController: NSViewController {
 
         if previewWindowController.isPresenting || window.styleMask.contains(.fullScreen) {
             setGridWindowFloating(false, window: window)
+            return
+        }
+
+        if seamlessModeEnabled {
+            setGridWindowFloating(true, window: window)
             return
         }
 
@@ -1782,6 +2012,7 @@ final class WorkspaceRootViewController: NSViewController {
             menuJumpPreviousDisplay()
             return true
         case .windowFollowHold:
+            guard !seamlessModeEnabled else { return false }
             if requireHoldingMoveShortcutEnabled {
                 return true
             }
@@ -1805,6 +2036,14 @@ final class WorkspaceRootViewController: NSViewController {
         case .navigateForward:
             guard isPointerWithinOrcvWindowBounds() else { return false }
             return navigateCameraForward()
+        case .toggleWindowFocus:
+            if let appDelegate = NSApp.delegate as? AppDelegate {
+                appDelegate.toggleOrcvFocus()
+            } else {
+                NSApp.activate(ignoringOtherApps: true)
+                view.window?.makeKeyAndOrderFront(nil)
+            }
+            return true
         }
     }
 
@@ -1816,7 +2055,7 @@ final class WorkspaceRootViewController: NSViewController {
 
     private func actionRequiresFocusedWindow(_ action: ShortcutAction) -> Bool {
         switch action {
-        case .toggleTeleport, .windowFollowHold, .hideWindow, .navigateBack, .navigateForward, .removeDisplay:
+        case .toggleTeleport, .windowFollowHold, .hideWindow, .navigateBack, .navigateForward, .removeDisplay, .toggleWindowFocus:
             return false
         case .newDisplay, .fullscreenSelected, .jumpNextDisplay, .jumpPreviousDisplay, .deselectTile:
             return true
@@ -2258,10 +2497,69 @@ final class WorkspaceRootViewController: NSViewController {
     }
 
     private func applyInteractionMode() {
-        canvasBackdropView.isHidden = false
+        applyWindowPresentationPreferences()
         if gridView.cameraMagnification < minCanvasMagnification || gridView.cameraMagnification > maxCanvasMagnification {
             gridView.cameraMagnification = 1.0
         }
+    }
+
+    private func applyWindowPresentationPreferences() {
+        if !seamlessModeEnabled {
+            seamlessFocusLockEnabled = false
+        }
+        canvasBackdropView.isHidden = seamlessModeEnabled
+        gridView.sharpCornersEnabled = sharpCornersPreferenceEnabled || seamlessModeEnabled
+        seamlessFocusBorderView.isHidden = !(seamlessModeEnabled && seamlessFocusLockEnabled)
+        if seamlessModeEnabled {
+            setWindowFollowToggleActive(false)
+        }
+        updateSeamlessMousePassthroughIfNeeded()
+        onWindowPresentationChange?()
+    }
+
+    private func setSeamlessModeEnabled(_ enabled: Bool, scheduleSave: Bool = true) {
+        guard seamlessModeEnabled != enabled else { return }
+        seamlessModeEnabled = enabled
+        if !enabled {
+            seamlessFocusLockEnabled = false
+        }
+        applyWindowPresentationPreferences()
+        refreshGridWindowLevelForPointerMapping()
+        if scheduleSave {
+            scheduleStateSave()
+        }
+    }
+
+    private func updateSeamlessMousePassthroughIfNeeded() {
+        guard let window = view.window else { return }
+        let shouldIgnoreMouseEvents: Bool
+        if seamlessModeEnabled {
+            if seamlessFocusLockEnabled {
+                shouldIgnoreMouseEvents = false
+            } else if !window.isVisible || previewWindowController.isPresenting || window.styleMask.contains(.fullScreen) {
+                shouldIgnoreMouseEvents = true
+            } else {
+                shouldIgnoreMouseEvents = !isMouseOverInteractiveWorkspaceTile(screenPoint: NSEvent.mouseLocation)
+            }
+        } else {
+            shouldIgnoreMouseEvents = false
+        }
+
+        guard window.ignoresMouseEvents != shouldIgnoreMouseEvents else { return }
+        window.ignoresMouseEvents = shouldIgnoreMouseEvents
+    }
+
+    private func isMouseOverInteractiveWorkspaceTile(screenPoint: CGPoint) -> Bool {
+        guard let window = view.window, window.isVisible else { return false }
+        let pointInWindow = window.convertPoint(fromScreen: screenPoint)
+        let pointInGrid = gridView.convert(pointInWindow, from: nil)
+        return gridView.hitTestWorkspace(at: pointInGrid) != nil
+    }
+
+    private func consumeSeamlessFocusLockClick() -> Bool {
+        guard seamlessFocusLockEnabled else { return false }
+        setSeamlessFocusLockEnabled(false)
+        return true
     }
 
     private func centerCanvasViewport() {
@@ -2551,7 +2849,8 @@ final class WorkspaceRootViewController: NSViewController {
             camera: camera,
             windowFrame: view.window?.frame,
             referenceTileID: ref,
-            cameraOffsetFromTile: offset
+            cameraOffsetFromTile: offset,
+            seamlessModeEnabled: seamlessModeEnabled
         )
         canvasSavepoints[slot] = savepoint
         lastCanvasCamera = camera
@@ -2603,7 +2902,10 @@ final class WorkspaceRootViewController: NSViewController {
             pushCameraHistory()
         }
 
-        if restoreWindowFrameOnSavepointRecallEnabled,
+        setSeamlessModeEnabled(savepoint.seamlessModeEnabled, scheduleSave: false)
+
+        if !savepoint.seamlessModeEnabled,
+           restoreWindowFrameOnSavepointRecallEnabled,
            let window = view.window,
            let targetFrame = savepoint.windowFrame {
             suppressWindowResizeUndoRegistration = true
@@ -2671,7 +2973,8 @@ final class WorkspaceRootViewController: NSViewController {
                 referenceTileSerial: refSerial,
                 referenceTileIndex: refIndex,
                 tileOffsetX: savepoint.cameraOffsetFromTile.map { Double($0.x) },
-                tileOffsetY: savepoint.cameraOffsetFromTile.map { Double($0.y) }
+                tileOffsetY: savepoint.cameraOffsetFromTile.map { Double($0.y) },
+                seamlessMode: savepoint.seamlessModeEnabled ? true : nil
             )
         }
         return encoded.isEmpty ? nil : encoded
@@ -2769,7 +3072,8 @@ final class WorkspaceRootViewController: NSViewController {
                 camera: camera,
                 windowFrame: windowFrame,
                 referenceTileID: referenceTileID,
-                cameraOffsetFromTile: resolvedOffset
+                cameraOffsetFromTile: resolvedOffset,
+                seamlessModeEnabled: bookmark.seamlessMode ?? false
             )
         }
         return decoded
@@ -2910,6 +3214,13 @@ final class WorkspaceRootViewController: NSViewController {
         }
 
         let cameraToPersist = currentCanvasCameraState() ?? lastCanvasCamera
+        let currentWindowFrame = view.window?.frame ?? lastObservedWindowFrame
+        let windowedRestoreFrame = seamlessModeEnabled
+            ? seamlessRestoreWindowFrame
+            : currentWindowFrame
+        let windowedRestoreCamera = seamlessModeEnabled
+            ? seamlessRestoreCamera
+            : cameraToPersist
 
         return PersistedWorkspaceState(
             version: 1,
@@ -2921,10 +3232,22 @@ final class WorkspaceRootViewController: NSViewController {
             canvasMagnification: cameraToPersist.map { Double($0.magnification) },
             canvasOffsetX: cameraToPersist.map { Double($0.origin.x) },
             canvasOffsetY: cameraToPersist.map { Double($0.origin.y) },
+            windowX: currentWindowFrame.map { Double($0.origin.x) },
+            windowY: currentWindowFrame.map { Double($0.origin.y) },
+            windowWidth: currentWindowFrame.map { Double($0.size.width) },
+            windowHeight: currentWindowFrame.map { Double($0.size.height) },
+            windowedRestoreX: windowedRestoreFrame.map { Double($0.origin.x) },
+            windowedRestoreY: windowedRestoreFrame.map { Double($0.origin.y) },
+            windowedRestoreWidth: windowedRestoreFrame.map { Double($0.size.width) },
+            windowedRestoreHeight: windowedRestoreFrame.map { Double($0.size.height) },
+            windowedRestoreCanvasMagnification: windowedRestoreCamera.map { Double($0.magnification) },
+            windowedRestoreCanvasOffsetX: windowedRestoreCamera.map { Double($0.origin.x) },
+            windowedRestoreCanvasOffsetY: windowedRestoreCamera.map { Double($0.origin.y) },
             canvasSavepoints: persistedCanvasSavepoints(),
             arrangePadding: Double(arrangePadding),
             autoArrangeModeRawValue: autoArrangeMode?.rawValue,
-            sharpCorners: gridView.sharpCornersEnabled ? true : nil,
+            sharpCorners: sharpCornersPreferenceEnabled ? true : nil,
+            seamlessMode: seamlessModeEnabled ? true : nil,
             requireHoldingMoveShortcut: requireHoldingMoveShortcutEnabled ? true : nil,
             limitFPS: fpsLimitValue,
             unlockFPSIfInteracting: unlockFPSIfInteractingEnabled,
@@ -2940,9 +3263,13 @@ final class WorkspaceRootViewController: NSViewController {
         let nextVirtualIndex: Int
         let canvasCamera: CanvasCameraState?
         let canvasSavepoints: [Int: CanvasSavepoint]
+        let windowFrame: CGRect?
+        let seamlessRestoreWindowFrame: CGRect?
+        let seamlessRestoreCamera: CanvasCameraState?
         let arrangePadding: CGFloat?
         let autoArrangeMode: ArrangeMode?
         let sharpCorners: Bool
+        let seamlessMode: Bool
         let requireHoldingMoveShortcut: Bool
         let limitFPS: Double
         let unlockFPSIfInteracting: Bool
@@ -2960,9 +3287,13 @@ final class WorkspaceRootViewController: NSViewController {
                 nextVirtualIndex: nextVirtualIndex,
                 canvasCamera: nil,
                 canvasSavepoints: [:],
+                windowFrame: nil,
+                seamlessRestoreWindowFrame: nil,
+                seamlessRestoreCamera: nil,
                 arrangePadding: nil,
                 autoArrangeMode: nil,
                 sharpCorners: false,
+                seamlessMode: false,
                 requireHoldingMoveShortcut: false,
                 limitFPS: 60.0,
                 unlockFPSIfInteracting: true,
@@ -3026,9 +3357,27 @@ final class WorkspaceRootViewController: NSViewController {
                 serialToID: Dictionary(uniqueKeysWithValues: restoredSerialByWorkspaceID.map { ($0.value, $0.key) }),
                 indexToID: restored.map(\.id)
             ),
+            windowFrame: restoredWindowFrame(
+                x: persisted.windowX,
+                y: persisted.windowY,
+                width: persisted.windowWidth,
+                height: persisted.windowHeight
+            ),
+            seamlessRestoreWindowFrame: restoredWindowFrame(
+                x: persisted.windowedRestoreX,
+                y: persisted.windowedRestoreY,
+                width: persisted.windowedRestoreWidth,
+                height: persisted.windowedRestoreHeight
+            ),
+            seamlessRestoreCamera: restoredCamera(
+                magnification: persisted.windowedRestoreCanvasMagnification,
+                x: persisted.windowedRestoreCanvasOffsetX,
+                y: persisted.windowedRestoreCanvasOffsetY
+            ),
             arrangePadding: persisted.arrangePadding.map { CGFloat($0) },
             autoArrangeMode: persisted.autoArrangeModeRawValue.flatMap { ArrangeMode(rawValue: $0) },
             sharpCorners: persisted.sharpCorners ?? false,
+            seamlessMode: persisted.seamlessMode ?? false,
             requireHoldingMoveShortcut: persisted.requireHoldingMoveShortcut ?? false,
             limitFPS: clampedFPSLimit(persisted.limitFPS ?? 60.0),
             unlockFPSIfInteracting: persisted.unlockFPSIfInteracting ?? true,
@@ -3046,9 +3395,19 @@ final class WorkspaceRootViewController: NSViewController {
     }
 
     private func restoredCanvasCamera(from persisted: PersistedWorkspaceState) -> CanvasCameraState? {
-        guard let magnification = persisted.canvasMagnification,
-              let x = persisted.canvasOffsetX,
-              let y = persisted.canvasOffsetY else {
+        restoredCamera(
+            magnification: persisted.canvasMagnification,
+            x: persisted.canvasOffsetX,
+            y: persisted.canvasOffsetY
+        )
+    }
+
+    private func restoredCamera(
+        magnification: Double?,
+        x: Double?,
+        y: Double?
+    ) -> CanvasCameraState? {
+        guard let magnification, let x, let y else {
             return nil
         }
         guard magnification.isFinite, x.isFinite, y.isFinite, magnification > 0 else {
@@ -3058,6 +3417,20 @@ final class WorkspaceRootViewController: NSViewController {
             magnification: CGFloat(magnification),
             origin: CGPoint(x: x, y: y)
         )
+    }
+
+    private func restoredWindowFrame(
+        x: Double?,
+        y: Double?,
+        width: Double?,
+        height: Double?
+    ) -> CGRect? {
+        guard let x, let y, let width, let height,
+              x.isFinite, y.isFinite, width.isFinite, height.isFinite,
+              width > 1, height > 1 else {
+            return nil
+        }
+        return CGRect(x: x, y: y, width: width, height: height)
     }
 
     func menuFullscreenSelected() {
@@ -3104,9 +3477,12 @@ final class WorkspaceRootViewController: NSViewController {
         currentLayoutMode = .canvas
         lastCanvasCamera = bootstrap.canvasCamera
         canvasSavepoints = bootstrap.canvasSavepoints
+        seamlessRestoreWindowFrame = bootstrap.seamlessRestoreWindowFrame ?? bootstrap.windowFrame
+        seamlessRestoreCamera = bootstrap.seamlessRestoreCamera ?? bootstrap.canvasCamera
         if let padding = bootstrap.arrangePadding { arrangePadding = padding }
         autoArrangeMode = bootstrap.autoArrangeMode
-        gridView.sharpCornersEnabled = bootstrap.sharpCorners
+        sharpCornersPreferenceEnabled = bootstrap.sharpCorners
+        seamlessModeEnabled = bootstrap.seamlessMode
         requireHoldingMoveShortcutEnabled = bootstrap.requireHoldingMoveShortcut
         fpsLimitValue = clampedFPSLimit(bootstrap.limitFPS)
         unlockFPSIfInteractingEnabled = bootstrap.unlockFPSIfInteracting
@@ -3131,16 +3507,20 @@ final class WorkspaceRootViewController: NSViewController {
             layoutGridDocumentView()
             view.layoutSubtreeIfNeeded()
             applyDisplayArrangementImmediatelyIfNeeded()
-            scheduleStateSave()
         }
         DispatchQueue.main.async { [weak self] in
-            if let camera = self?.lastCanvasCamera {
-                self?.applyCanvasCamera(camera)
+            guard let self else { return }
+            if let camera = self.lastCanvasCamera {
+                self.applyCanvasCamera(camera)
             } else {
-                self?.centerCanvasViewport()
+                self.centerCanvasViewport()
             }
-            self?.ensureVisibleWorkspaceAfterBootstrap()
-            self?.seedCameraHistoryIfNeeded()
+            self.ensureVisibleWorkspaceAfterBootstrap()
+            self.seedCameraHistoryIfNeeded()
+            self.isRestoringState = false
+            if !bootstrap.workspaces.isEmpty {
+                self.scheduleStateSave()
+            }
         }
 
         setTileStatus(nil)
@@ -3182,4 +3562,312 @@ final class WorkspaceRootViewController: NSViewController {
         onInitialBootstrapComplete?()
     }
 
+}
+
+private struct FocusLockOverlayGeometry {
+    var outlineRect: CGRect = .zero
+    var topCornerRadius: CGFloat = 0.0
+}
+
+private final class FocusLockBorderView: NSView {
+
+    private let metalView = ChromaticAberrationMetalView(frame: .zero)
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        configure()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        configure()
+    }
+
+    private func configure() {
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+        metalView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(metalView)
+        NSLayoutConstraint.activate([
+            metalView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            metalView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            metalView.topAnchor.constraint(equalTo: topAnchor),
+            metalView.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    override func layout() {
+        super.layout()
+        metalView.overlayGeometry = resolvedOverlayGeometry()
+        metalView.setNeedsDisplay(metalView.bounds)
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        _ = point
+        return nil
+    }
+
+    private func resolvedOverlayGeometry() -> FocusLockOverlayGeometry {
+        FocusLockOverlayGeometry(
+            outlineRect: bounds,
+            topCornerRadius: resolvedTopCornerRadius(screenSafeInsets: window?.screen?.safeAreaInsets)
+        )
+    }
+
+    private func resolvedTopCornerRadius(screenSafeInsets: NSEdgeInsets?) -> CGFloat {
+        let edgeCandidates = [
+            screenSafeInsets?.left ?? 0.0,
+            screenSafeInsets?.right ?? 0.0,
+        ].filter { $0 > 0.5 }
+        if let smallest = edgeCandidates.min() {
+            return min(max(smallest, 8.0), 36.0)
+        }
+        return defaultTopCornerRadius()
+    }
+
+    private func defaultTopCornerRadius() -> CGFloat {
+        min(max(min(bounds.width, bounds.height) * 0.022, 12.0), 24.0)
+    }
+}
+
+private final class ChromaticAberrationMetalView: MTKView, MTKViewDelegate {
+    private struct Uniforms {
+        var viewportSize: SIMD2<Float>
+        var outlineRectMin: SIMD2<Float>
+        var outlineRectMax: SIMD2<Float>
+        var topCornerRadius: Float
+        var bandWidth: Float
+        var intensity: Float
+        var feather: Float
+    }
+
+    private static let shaderSource = """
+#include <metal_stdlib>
+using namespace metal;
+
+struct Uniforms {
+    float2 viewportSize;
+    float2 outlineRectMin;
+    float2 outlineRectMax;
+    float topCornerRadius;
+    float bandWidth;
+    float intensity;
+    float feather;
+};
+
+struct VertexOut {
+    float4 position [[position]];
+    float2 pixel;
+};
+
+vertex VertexOut chromaticVertex(uint vid [[vertex_id]], constant Uniforms& uniforms [[buffer(0)]]) {
+    constexpr float2 positions[6] = {
+        float2(-1.0, -1.0),
+        float2( 1.0, -1.0),
+        float2(-1.0,  1.0),
+        float2(-1.0,  1.0),
+        float2( 1.0, -1.0),
+        float2( 1.0,  1.0)
+    };
+    constexpr float2 uvs[6] = {
+        float2(0.0, 0.0),
+        float2(1.0, 0.0),
+        float2(0.0, 1.0),
+        float2(0.0, 1.0),
+        float2(1.0, 0.0),
+        float2(1.0, 1.0)
+    };
+
+    VertexOut out;
+    out.position = float4(positions[vid], 0.0, 1.0);
+    out.pixel = uvs[vid] * uniforms.viewportSize;
+    return out;
+}
+
+float topRoundedRectSDF(float2 pixel, float2 rectMin, float2 rectMax, float topRadius) {
+    float2 rectSize = rectMax - rectMin;
+    if (rectSize.x <= 0.5 || rectSize.y <= 0.5) {
+        return 1e6;
+    }
+
+    topRadius = min(topRadius, min(rectSize.x * 0.5, rectSize.y));
+    float2 center = (rectMin + rectMax) * 0.5;
+    float2 halfSize = rectSize * 0.5;
+    float2 local = pixel - center;
+
+    // Corner radii by quadrant: top-right, bottom-right, top-left, bottom-left.
+    float4 radii = float4(topRadius, 0.0, topRadius, 0.0);
+    radii.xy = (local.x > 0.0) ? radii.xy : radii.zw;
+    float radius = (local.y > 0.0) ? radii.x : radii.y;
+
+    float2 q = abs(local) - halfSize + float2(radius);
+    return min(max(q.x, q.y), 0.0) + length(max(q, float2(0.0))) - radius;
+}
+
+float edgeBand(float d, float width, float feather) {
+    float inner = max(width - feather, 0.5);
+    float x = abs(d);
+    return (1.0 - smoothstep(inner, max(width, inner + 0.5), x));
+}
+
+float3 hsv2rgb(float3 c) {
+    float4 K = float4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+    float3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+    return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+}
+
+fragment float4 chromaticFragment(VertexOut in [[stage_in]], constant Uniforms& uniforms [[buffer(0)]]) {
+    float2 outlineMin = uniforms.outlineRectMin;
+    float2 outlineMax = uniforms.outlineRectMax;
+    float radius = min(uniforms.topCornerRadius, (outlineMax.x - outlineMin.x) * 0.5);
+
+    float base = topRoundedRectSDF(in.pixel, outlineMin, outlineMax, radius);
+    float ring = edgeBand(base, uniforms.bandWidth, uniforms.feather);
+
+    float2 centered = in.pixel - uniforms.viewportSize * 0.5;
+    float angle = atan2(centered.y, centered.x);
+    float hue = fract(angle / (2.0 * 3.14159265) + 0.5 + base * 0.0025);
+    float3 rainbow = hsv2rgb(float3(hue, 0.80, 1.0));
+
+    float3 color = rainbow * ring;
+    color *= uniforms.intensity;
+
+    float alpha = saturate(ring) * uniforms.intensity;
+    if (alpha <= 0.001) {
+        discard_fragment();
+    }
+    return float4(color, alpha);
+}
+"""
+
+    var overlayGeometry = FocusLockOverlayGeometry() {
+        didSet {
+            if geometryChanged(from: oldValue, to: overlayGeometry) {
+                setNeedsDisplay(bounds)
+            }
+        }
+    }
+
+    private var pipelineState: MTLRenderPipelineState?
+    private var commandQueue: MTLCommandQueue?
+
+    override var isOpaque: Bool {
+        false
+    }
+
+    override init(frame frameRect: NSRect, device: MTLDevice?) {
+        let resolvedDevice = device ?? MTLCreateSystemDefaultDevice()
+        super.init(frame: frameRect, device: resolvedDevice)
+        commonInit()
+    }
+
+    required init(coder: NSCoder) {
+        super.init(coder: coder)
+        device = MTLCreateSystemDefaultDevice()
+        commonInit()
+    }
+
+    private func commonInit() {
+        translatesAutoresizingMaskIntoConstraints = false
+        framebufferOnly = false
+        isPaused = true
+        enableSetNeedsDisplay = true
+        autoResizeDrawable = true
+        clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        colorPixelFormat = .bgra8Unorm
+        wantsLayer = true
+        layer?.isOpaque = false
+        layer?.backgroundColor = NSColor.clear.cgColor
+        delegate = self
+        guard let device else { return }
+        do {
+            let library = try device.makeLibrary(source: Self.shaderSource, options: nil)
+            let vertexFunction = library.makeFunction(name: "chromaticVertex")
+            let fragmentFunction = library.makeFunction(name: "chromaticFragment")
+            let descriptor = MTLRenderPipelineDescriptor()
+            descriptor.vertexFunction = vertexFunction
+            descriptor.fragmentFunction = fragmentFunction
+            descriptor.colorAttachments[0].pixelFormat = colorPixelFormat
+            descriptor.colorAttachments[0].isBlendingEnabled = true
+            descriptor.colorAttachments[0].rgbBlendOperation = .add
+            descriptor.colorAttachments[0].alphaBlendOperation = .add
+            descriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+            descriptor.colorAttachments[0].sourceAlphaBlendFactor = .sourceAlpha
+            descriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+            descriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            pipelineState = try device.makeRenderPipelineState(descriptor: descriptor)
+            commandQueue = device.makeCommandQueue()
+        } catch {
+            pipelineState = nil
+            commandQueue = nil
+        }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateDrawableSize()
+        setNeedsDisplay(bounds)
+    }
+
+    override func layout() {
+        super.layout()
+        updateDrawableSize()
+        setNeedsDisplay(bounds)
+    }
+
+    private func updateDrawableSize() {
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1.0
+        drawableSize = CGSize(width: max(1.0, bounds.width * scale), height: max(1.0, bounds.height * scale))
+    }
+
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+        _ = view
+        _ = size
+    }
+
+    func draw(in view: MTKView) {
+        guard let drawable = currentDrawable,
+              let renderPassDescriptor = currentRenderPassDescriptor,
+              let pipelineState,
+              let commandQueue,
+              let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
+            return
+        }
+
+        var uniforms = makeUniforms()
+        encoder.setRenderPipelineState(pipelineState)
+        encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
+        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+        encoder.endEncoding()
+        commandBuffer.present(drawable)
+        commandBuffer.commit()
+    }
+
+    private func makeUniforms() -> Uniforms {
+        let size = SIMD2<Float>(Float(bounds.width), Float(bounds.height))
+        let outlineRect = overlayGeometry.outlineRect.isEmpty ? bounds : overlayGeometry.outlineRect
+        return Uniforms(
+            viewportSize: size,
+            outlineRectMin: SIMD2<Float>(Float(outlineRect.minX), Float(outlineRect.minY)),
+            outlineRectMax: SIMD2<Float>(Float(outlineRect.maxX), Float(outlineRect.maxY)),
+            topCornerRadius: Float(overlayGeometry.topCornerRadius),
+            bandWidth: 4.0,
+            intensity: 0.95,
+            feather: 2.5
+        )
+    }
+
+    private func geometryChanged(from oldValue: FocusLockOverlayGeometry, to newValue: FocusLockOverlayGeometry) -> Bool {
+        rectChanged(from: oldValue.outlineRect, to: newValue.outlineRect)
+            || abs(oldValue.topCornerRadius - newValue.topCornerRadius) > 0.5
+    }
+
+    private func rectChanged(from oldValue: CGRect, to newValue: CGRect) -> Bool {
+        abs(oldValue.minX - newValue.minX) > 0.5
+            || abs(oldValue.minY - newValue.minY) > 0.5
+            || abs(oldValue.maxX - newValue.maxX) > 0.5
+            || abs(oldValue.maxY - newValue.maxY) > 0.5
+    }
 }

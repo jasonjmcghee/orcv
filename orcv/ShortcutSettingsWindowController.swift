@@ -35,7 +35,7 @@ final class ShortcutSettingsWindowController: NSWindowController {
         stagedSavepointModifierToken = ShortcutManager.modifierToken(from: shortcutManager.savepointModifierValue())
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 590),
+            contentRect: NSRect(x: 0, y: 0, width: 620, height: 680),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false

@@ -19,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var requireHoldingMoveShortcutMenuItem: NSMenuItem?
     private var swapResizeBehaviorMenuItem: NSMenuItem?
     private var sharpCornersMenuItem: NSMenuItem?
+    private var seamlessModeMenuItem: NSMenuItem?
     private var windowVisibilityMenuItem: NSMenuItem?
     private var autoArrangeOffItem: NSMenuItem?
     private var autoArrangeColumnItem: NSMenuItem?
@@ -26,8 +27,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var autoArrangeSquareItem: NSMenuItem?
     private var arrangeSettingsWindowController: ArrangeSettingsWindowController?
     private var limitFPSSettingsWindowController: LimitFPSSettingsWindowController?
+    private var windowedFrameBeforeSeamlessMode: CGRect?
+    private var isWindowInSeamlessMode = false
+    private var hasCompletedInitialWindowPresentation = false
+    private weak var lastNonOrcvFocusedApplication: NSRunningApplication?
     private var terminateInProgress = false
     private var didShowMainWindow = false
+
+    private struct LaunchWindowState {
+        let frame: CGRect?
+        let seamlessRestoreFrame: CGRect?
+        let sharpCornersEnabled: Bool
+        let seamlessModeEnabled: Bool
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         _ = notification
@@ -42,6 +54,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         evaluateLaunchPermissions()
     }
 
+    func applicationDidResignActive(_ notification: Notification) {
+        _ = notification
+        rootViewController?.setSeamlessFocusLockEnabled(false)
+    }
+
     private func startMainApplication(hasScreenCaptureAccess: Bool) {
         guard window == nil, rootViewController == nil else { return }
         let displayManager = VirtualDisplayManager()
@@ -50,6 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let bundleID = Bundle.main.bundleIdentifier ?? "today.jason.orcv"
         let shortcutManager = ShortcutManager(bundleIdentifier: bundleID)
         let stateStore = WorkspaceStateStore(bundleIdentifier: bundleID)
+        let launchWindowState = launchWindowState(from: stateStore.load())
         self.shortcutManager = shortcutManager
         shortcutManager.onDidChange = { [weak self] in
             self?.syncWindowVisibilityMenuShortcut()
@@ -61,12 +79,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             pointerRouter: pointerRouter,
             shortcutManager: shortcutManager,
             stateStore: stateStore,
-            hasScreenCaptureAccess: hasScreenCaptureAccess
+            hasScreenCaptureAccess: hasScreenCaptureAccess,
+            initialSharpCornersEnabled: launchWindowState.sharpCornersEnabled,
+            initialSeamlessModeEnabled: launchWindowState.seamlessModeEnabled
         )
 
         let window = NSWindow(
-            contentRect: NSRect(x: 140, y: 120, width: 1280, height: 820),
-            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+            contentRect: launchWindowState.frame ?? NSRect(x: 140, y: 120, width: 1280, height: 820),
+            styleMask: launchWindowState.seamlessModeEnabled
+                ? [.borderless]
+                : (launchWindowState.sharpCornersEnabled
+                    ? [.borderless, .resizable, .fullSizeContentView]
+                    : [.titled, .closable, .resizable, .fullSizeContentView]),
             backing: .buffered,
             defer: false
         )
@@ -85,13 +109,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         window.collectionBehavior = behavior
         window.delegate = self
         window.contentViewController = root
+        self.window = window
+        self.rootViewController = root
+        windowedFrameBeforeSeamlessMode = launchWindowState.seamlessRestoreFrame
+        isWindowInSeamlessMode = launchWindowState.seamlessModeEnabled
         applyChromelessWindowStyle(window)
 
         window.setFrameAutosaveName(Self.mainWindowAutosaveName)
-        _ = window.setFrameUsingName(Self.mainWindowAutosaveName, force: false)
+        if launchWindowState.frame == nil {
+            _ = window.setFrameUsingName(Self.mainWindowAutosaveName, force: false)
+        }
 
-        self.window = window
-        self.rootViewController = root
+        root.onWindowPresentationChange = { [weak self] in
+            self?.syncMainWindowPresentation()
+        }
         root.onInitialBootstrapComplete = { [weak self] in
             self?.showMainWindowWhenReady()
         }
@@ -269,6 +300,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         sharpCornersItem.state = .off
         sharpCornersMenuItem = sharpCornersItem
         viewMenu.addItem(sharpCornersItem)
+
+        let seamlessModeItem = NSMenuItem(
+            title: "Seamless Mode",
+            action: #selector(toggleSeamlessMode(_:)),
+            keyEquivalent: ""
+        )
+        seamlessModeItem.target = self
+        seamlessModeItem.state = .off
+        seamlessModeMenuItem = seamlessModeItem
+        viewMenu.addItem(seamlessModeItem)
 
         let limitFPSSettingsItem = NSMenuItem(
             title: "Limit FPS Settings…",
@@ -690,10 +731,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func toggleSharpCorners(_ sender: Any?) {
         _ = sender
         rootViewController?.menuToggleSharpCorners()
-        sharpCornersMenuItem?.state = rootViewController?.menuSharpCornersEnabled() == true ? .on : .off
-        if let window {
-            applyChromelessWindowStyle(window)
-        }
+        syncMainWindowPresentation()
+    }
+
+    @objc
+    private func toggleSeamlessMode(_ sender: Any?) {
+        _ = sender
+        rootViewController?.menuToggleSeamlessMode()
+        syncMainWindowPresentation()
     }
 
     @objc
@@ -711,6 +756,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return
         }
         NSApp.hide(nil)
+    }
+
+    func toggleOrcvFocus() {
+        guard let window else { return }
+        let currentApp = NSRunningApplication.current
+        let frontmost = NSWorkspace.shared.frontmostApplication
+        if let frontmost, frontmost != currentApp {
+            lastNonOrcvFocusedApplication = frontmost
+        }
+
+        if rootViewController?.menuSeamlessModeEnabled() == true {
+            if rootViewController?.seamlessFocusLockIsEnabled() == true {
+                rootViewController?.setSeamlessFocusLockEnabled(false)
+                _ = lastNonOrcvFocusedApplication?.activate(options: [.activateIgnoringOtherApps])
+                return
+            }
+
+            if NSApp.isHidden {
+                NSApp.unhide(nil)
+            }
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            rootViewController?.setSeamlessFocusLockEnabled(true)
+            return
+        }
+
+        let isWindowFocused = NSApp.isActive && (NSApp.keyWindow === window || NSApp.mainWindow === window)
+        if isWindowFocused {
+            _ = lastNonOrcvFocusedApplication?.activate(options: [.activateIgnoringOtherApps])
+            return
+        }
+
+        if NSApp.isHidden {
+            NSApp.unhide(nil)
+        }
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc
@@ -879,7 +961,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard !didShowMainWindow, let window else { return }
         didShowMainWindow = true
         window.makeKeyAndOrderFront(nil)
-        applyChromelessWindowStyle(window)
+        syncMainWindowPresentation()
         alwaysOnTopMenuItem?.state = rootViewController?.menuAlwaysOnTopEnabled() == true ? .on : .off
         showDisplayIDsMenuItem?.state = rootViewController?.menuShowDisplayIDsEnabled() == true ? .on : .off
         centerTileOnJumpMenuItem?.state = rootViewController?.menuCenterTileOnJumpEnabled() == true ? .on : .off
@@ -887,10 +969,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         restoreWindowFrameOnSavepointRecallMenuItem?.state = rootViewController?.menuRestoreWindowFrameOnSavepointRecallEnabled() == true ? .on : .off
         requireHoldingMoveShortcutMenuItem?.state = rootViewController?.menuRequireHoldingMoveShortcutEnabled() == true ? .on : .off
         swapResizeBehaviorMenuItem?.state = rootViewController?.menuSwapResizeBehaviorEnabled() == true ? .on : .off
-        sharpCornersMenuItem?.state = rootViewController?.menuSharpCornersEnabled() == true ? .on : .off
         DispatchQueue.main.async { [weak self] in
-            guard let window = self?.window else { return }
-            self?.applyChromelessWindowStyle(window)
+            self?.syncMainWindowPresentation()
             self?.alwaysOnTopMenuItem?.state = self?.rootViewController?.menuAlwaysOnTopEnabled() == true ? .on : .off
             self?.showDisplayIDsMenuItem?.state = self?.rootViewController?.menuShowDisplayIDsEnabled() == true ? .on : .off
             self?.centerTileOnJumpMenuItem?.state = self?.rootViewController?.menuCenterTileOnJumpEnabled() == true ? .on : .off
@@ -898,16 +978,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self?.restoreWindowFrameOnSavepointRecallMenuItem?.state = self?.rootViewController?.menuRestoreWindowFrameOnSavepointRecallEnabled() == true ? .on : .off
             self?.requireHoldingMoveShortcutMenuItem?.state = self?.rootViewController?.menuRequireHoldingMoveShortcutEnabled() == true ? .on : .off
             self?.swapResizeBehaviorMenuItem?.state = self?.rootViewController?.menuSwapResizeBehaviorEnabled() == true ? .on : .off
-            self?.sharpCornersMenuItem?.state = self?.rootViewController?.menuSharpCornersEnabled() == true ? .on : .off
+            self?.hasCompletedInitialWindowPresentation = true
         }
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    private func syncMainWindowPresentation() {
+        guard let window else { return }
+        applyChromelessWindowStyle(window)
+        sharpCornersMenuItem?.state = rootViewController?.menuSharpCornersEnabled() == true ? .on : .off
+        seamlessModeMenuItem?.state = rootViewController?.menuSeamlessModeEnabled() == true ? .on : .off
+    }
+
     private func applyChromelessWindowStyle(_ window: NSWindow) {
-        let sharpCorners = rootViewController?.menuSharpCornersEnabled() == true
-        let targetStyleMask: NSWindow.StyleMask = sharpCorners
-            ? [.borderless, .resizable, .fullSizeContentView]
-            : [.titled, .closable, .resizable, .fullSizeContentView]
+        let seamlessMode = rootViewController?.menuSeamlessModeEnabled() == true
+        let sharpCorners = seamlessMode || rootViewController?.menuSharpCornersEnabled() == true
+        let targetStyleMask: NSWindow.StyleMask = seamlessMode
+            ? [.borderless]
+            : (sharpCorners
+                ? [.borderless, .resizable, .fullSizeContentView]
+                : [.titled, .closable, .resizable, .fullSizeContentView])
+        let wasSeamlessMode = isWindowInSeamlessMode
+        if seamlessMode, !wasSeamlessMode {
+            windowedFrameBeforeSeamlessMode = window.frame
+            rootViewController?.captureSeamlessRestoreSnapshot()
+        }
         if window.styleMask != targetStyleMask {
             let frame = window.frame
             window.styleMask = targetStyleMask
@@ -919,7 +1014,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         window.titlebarSeparatorStyle = .none
         window.isOpaque = false
         window.backgroundColor = .clear
-        window.hasShadow = true
+        window.isMovableByWindowBackground = !seamlessMode
+        window.hasShadow = !seamlessMode
         let buttons = [NSWindow.ButtonType.closeButton, .zoomButton]
         for kind in buttons {
             guard let button = window.standardWindowButton(kind) else { continue }
@@ -933,6 +1029,75 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             titlebarContainer.alphaValue = 0.0
         }
 
+        if seamlessMode {
+            if let targetScreen = seamlessTargetScreen(for: window) {
+                if let rootViewController {
+                    if !hasCompletedInitialWindowPresentation {
+                        rootViewController.applyWindowFrameWithoutAdjustingCanvas(targetScreen.frame)
+                    } else {
+                        rootViewController.applyWindowFramePreservingScreenProjection(targetScreen.frame)
+                    }
+                } else {
+                    window.setFrame(targetScreen.frame, display: true, animate: false)
+                }
+            }
+        } else if wasSeamlessMode, let restoreFrame = windowedFrameBeforeSeamlessMode {
+            if let rootViewController {
+                rootViewController.applySeamlessRestoreSnapshot()
+            } else {
+                window.setFrame(restoreFrame, display: true, animate: false)
+            }
+            rootViewController?.setSeamlessRestoreWindowFrame(restoreFrame, scheduleSave: false)
+        }
+
+        isWindowInSeamlessMode = seamlessMode
+    }
+
+    private func seamlessTargetScreen(for window: NSWindow) -> NSScreen? {
+        if let screen = screenContaining(point: NSEvent.mouseLocation) {
+            return screen
+        }
+        return window.screen ?? NSScreen.main ?? NSScreen.screens.first
+    }
+
+    private func screenContaining(point: CGPoint) -> NSScreen? {
+        NSScreen.screens.first { NSMouseInRect(point, $0.frame, false) }
+    }
+
+    private func launchWindowState(from persisted: PersistedWorkspaceState?) -> LaunchWindowState {
+        let frame = restoredWindowFrame(
+            x: persisted?.windowX,
+            y: persisted?.windowY,
+            width: persisted?.windowWidth,
+            height: persisted?.windowHeight
+        )
+        let seamlessModeEnabled = persisted?.seamlessMode ?? false
+        let seamlessRestoreFrame = restoredWindowFrame(
+            x: persisted?.windowedRestoreX,
+            y: persisted?.windowedRestoreY,
+            width: persisted?.windowedRestoreWidth,
+            height: persisted?.windowedRestoreHeight
+        ) ?? (seamlessModeEnabled ? nil : frame)
+        return LaunchWindowState(
+            frame: frame,
+            seamlessRestoreFrame: seamlessRestoreFrame,
+            sharpCornersEnabled: persisted?.sharpCorners ?? false,
+            seamlessModeEnabled: seamlessModeEnabled
+        )
+    }
+
+    private func restoredWindowFrame(
+        x: Double?,
+        y: Double?,
+        width: Double?,
+        height: Double?
+    ) -> CGRect? {
+        guard let x, let y, let width, let height,
+              x.isFinite, y.isFinite, width.isFinite, height.isFinite,
+              width > 1, height > 1 else {
+            return nil
+        }
+        return CGRect(x: x, y: y, width: width, height: height)
     }
 }
 
