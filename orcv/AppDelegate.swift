@@ -26,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var autoArrangeSquareItem: NSMenuItem?
     private var arrangeSettingsWindowController: ArrangeSettingsWindowController?
     private var limitFPSSettingsWindowController: LimitFPSSettingsWindowController?
+    private var displayResolutionSettingsWindowController: DisplayResolutionSettingsWindowController?
     private var terminateInProgress = false
     private var didShowMainWindow = false
 
@@ -173,6 +174,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         closeDisplayItem.keyEquivalentModifierMask = [.command]
         closeDisplayItem.target = self
         fileMenu.addItem(closeDisplayItem)
+
+        fileMenu.addItem(.separator())
+
+        let displayResolutionItem = NSMenuItem(
+            title: "New Display Resolution\u{2026}",
+            action: #selector(showDisplayResolutionSettings(_:)),
+            keyEquivalent: ""
+        )
+        displayResolutionItem.target = self
+        fileMenu.addItem(displayResolutionItem)
+
         fileMenuItem.submenu = fileMenu
 
         let editMenuItem = NSMenuItem()
@@ -757,6 +769,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         _ = sender
         rootViewController?.menuSetAutoArrangeMode(.square)
         refreshAutoArrangeMenuState()
+    }
+
+    @objc
+    private func showDisplayResolutionSettings(_ sender: Any?) {
+        _ = sender
+        guard let rootViewController else { return }
+        if displayResolutionSettingsWindowController == nil {
+            displayResolutionSettingsWindowController = DisplayResolutionSettingsWindowController(
+                currentResolution: { [weak rootViewController] in
+                    rootViewController?.menuDefaultDisplayResolution()
+                },
+                onSave: { [weak rootViewController] resolution in
+                    rootViewController?.menuSetDefaultDisplayResolution(resolution)
+                }
+            )
+        }
+        displayResolutionSettingsWindowController?.showWindow(nil)
+        displayResolutionSettingsWindowController?.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc
