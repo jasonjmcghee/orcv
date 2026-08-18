@@ -68,6 +68,23 @@ enum DisplayQuery {
     }
 }
 
+/// Logical size (points) + backing scale used when creating a virtual display.
+struct DisplayResolution: Equatable {
+    var width: Int
+    var height: Int
+    var hiDPI: Bool
+
+    init(width: Int, height: Int, hiDPI: Bool) {
+        self.width = max(320, width)
+        self.height = max(240, height)
+        self.hiDPI = hiDPI
+    }
+
+    init(_ profile: VirtualDisplayManager.DisplayProfile) {
+        self.init(width: profile.width, height: profile.height, hiDPI: profile.hiDPI)
+    }
+}
+
 enum TileGeometry {
     static let defaultTileWidth: CGFloat = 360.0
 

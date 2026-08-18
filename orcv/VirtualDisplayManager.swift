@@ -13,6 +13,7 @@ final class VirtualDisplayManager {
 
     private var virtualDisplays: [CGDirectDisplayID: CGVirtualDisplay] = [:]
     private var virtualDisplaySerials: [CGDirectDisplayID: UInt32] = [:]
+    private var virtualDisplayProfiles: [CGDirectDisplayID: DisplayProfile] = [:]
     private var serialCounter: UInt32 = 100
 
     func mainDisplayProfile() -> DisplayProfile {
@@ -44,6 +45,20 @@ final class VirtualDisplayManager {
             height: height,
             hiDPI: hiDPI,
             physicalSizeMM: physical
+        )
+    }
+
+    /// Profile for an explicitly requested resolution. Physical size is derived from
+    /// the requested aspect ratio so the system reports square pixels.
+    func profile(width: Int, height: Int, hiDPI: Bool) -> DisplayProfile {
+        let w = max(320, width)
+        let h = max(240, height)
+        let physicalWidth = 600.0
+        return DisplayProfile(
+            width: w,
+            height: h,
+            hiDPI: hiDPI,
+            physicalSizeMM: CGSize(width: physicalWidth, height: physicalWidth * CGFloat(h) / CGFloat(w))
         )
     }
 
@@ -148,6 +163,12 @@ final class VirtualDisplayManager {
         let displayID = display.displayID
         virtualDisplays[displayID] = display
         virtualDisplaySerials[displayID] = assignedSerial
+        virtualDisplayProfiles[displayID] = DisplayProfile(
+            width: width,
+            height: height,
+            hiDPI: hidpi,
+            physicalSizeMM: descriptor.sizeInMillimeters
+        )
         serialCounter = max(serialCounter, assignedSerial &+ 1)
         let actualPixelSize = resolvedPixelSize(displayID: displayID, fallbackLogicalWidth: width, fallbackLogicalHeight: height, hidpi: hidpi)
 
@@ -211,16 +232,22 @@ final class VirtualDisplayManager {
             return false
         }
         virtualDisplaySerials.removeValue(forKey: displayID)
+        virtualDisplayProfiles.removeValue(forKey: displayID)
         return true
     }
 
     func removeAllVirtualDisplays() {
         virtualDisplays.removeAll()
         virtualDisplaySerials.removeAll()
+        virtualDisplayProfiles.removeAll()
     }
 
     func virtualDisplaySerial(for displayID: CGDirectDisplayID) -> UInt32? {
         virtualDisplaySerials[displayID]
+    }
+
+    func virtualDisplayProfile(for displayID: CGDirectDisplayID) -> DisplayProfile? {
+        virtualDisplayProfiles[displayID]
     }
 
     func applyDisplayOrigins(_ origins: [CGDirectDisplayID: CGPoint]) -> Bool {

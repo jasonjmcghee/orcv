@@ -24,6 +24,9 @@ struct PersistedWorkspaceState: Codable {
         var displaySerial: UInt32?
         var canvasX: Double?
         var canvasY: Double?
+        var logicalWidth: Int?
+        var logicalHeight: Int?
+        var hiDPI: Bool?
     }
 
     var version: Int
@@ -44,6 +47,9 @@ struct PersistedWorkspaceState: Codable {
     var unlockFPSIfInteracting: Bool?
     var unlockFPSIfLargerThanPercent: Bool?
     var unlockFPSLargerThanPercentThreshold: Double?
+    var defaultDisplayWidth: Int?
+    var defaultDisplayHeight: Int?
+    var defaultDisplayHiDPI: Bool?
     var workspaces: [WorkspaceEntry]
 }
 

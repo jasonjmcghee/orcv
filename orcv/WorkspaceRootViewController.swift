@@ -55,6 +55,9 @@ final class WorkspaceRootViewController: NSViewController {
     private var globalSwipeMonitor: Any?
     private var localCanvasScrollMonitor: Any?
     private var globalCanvasScrollMonitor: Any?
+    private var localMiddleDragMonitor: Any?
+    private var globalMiddleDragMonitor: Any?
+    private var isMiddleDragPanning = false
     private var localMagnifyMonitor: Any?
     private var globalMagnifyMonitor: Any?
     private var canvasCameraSaveDebounceWorkItem: DispatchWorkItem?
@@ -107,6 +110,8 @@ final class WorkspaceRootViewController: NSViewController {
     private var unlockFPSIfLargerThanPercentEnabled = false
     private var unlockFPSLargerThanPercentThreshold: Double = 70.0
     private(set) var arrangePadding: CGFloat = 2.0
+    /// nil = mirror the main display (default). Otherwise the logical size used for new virtual displays.
+    private var defaultDisplayResolution: DisplayResolution?
     private(set) var autoArrangeMode: ArrangeMode?
     private var pendingScrollZoomDelta: CGFloat = 0.0
     private var shiftPanAxisLock: ShiftPanAxisLock?
@@ -153,6 +158,12 @@ final class WorkspaceRootViewController: NSViewController {
         }
         if let localCanvasScrollMonitor {
             NSEvent.removeMonitor(localCanvasScrollMonitor)
+        }
+        if let localMiddleDragMonitor {
+            NSEvent.removeMonitor(localMiddleDragMonitor)
+        }
+        if let globalMiddleDragMonitor {
+            NSEvent.removeMonitor(globalMiddleDragMonitor)
         }
         if let globalCanvasScrollMonitor {
             NSEvent.removeMonitor(globalCanvasScrollMonitor)
@@ -389,6 +400,7 @@ final class WorkspaceRootViewController: NSViewController {
         installSwipeMonitorsIfNeeded()
         installMagnificationMonitorIfNeeded()
         installCanvasScrollMonitorsIfNeeded()
+        installMiddleDragMonitorsIfNeeded()
         updateEmptyStateCallout()
     }
 
@@ -671,7 +683,12 @@ final class WorkspaceRootViewController: NSViewController {
             NSSound.beep()
             return
         }
-        registerUndoForDelete(removed: removed.workspace, index: removed.index, actionName: "Remove Display")
+        registerUndoForDelete(
+            removed: removed.workspace,
+            index: removed.index,
+            resolution: removed.resolution,
+            actionName: "Remove Display"
+        )
         autoArrangeIfNeeded()
     }
 
@@ -962,6 +979,15 @@ final class WorkspaceRootViewController: NSViewController {
         autoArrangeMode
     }
 
+    func menuDefaultDisplayResolution() -> DisplayResolution? {
+        defaultDisplayResolution
+    }
+
+    func menuSetDefaultDisplayResolution(_ resolution: DisplayResolution?) {
+        defaultDisplayResolution = resolution
+        scheduleStateSave()
+    }
+
     func menuArrangePadding() -> CGFloat {
         arrangePadding
     }
@@ -1099,11 +1125,26 @@ final class WorkspaceRootViewController: NSViewController {
         let title: String
         let tileSize: CGSize
         let index: Int
+        let resolution: DisplayResolution?
     }
 
     @discardableResult
-    private func createVirtualWorkspace(name: String, tileSize: CGSize?, at index: Int?) -> Workspace? {
-        let profile = displayManager.mainDisplayProfile()
+    private func newDisplayProfile() -> VirtualDisplayManager.DisplayProfile {
+        guard let resolution = defaultDisplayResolution else {
+            return displayManager.mainDisplayProfile()
+        }
+        return displayManager.profile(width: resolution.width, height: resolution.height, hiDPI: resolution.hiDPI)
+    }
+
+    private func createVirtualWorkspace(
+        name: String,
+        tileSize: CGSize?,
+        at index: Int?,
+        resolution: DisplayResolution? = nil
+    ) -> Workspace? {
+        let profile = resolution.map {
+            displayManager.profile(width: $0.width, height: $0.height, hiDPI: $0.hiDPI)
+        } ?? newDisplayProfile()
         guard let descriptor = displayManager.createVirtualDisplay(
             name: name,
             width: profile.width,
@@ -1114,18 +1155,24 @@ final class WorkspaceRootViewController: NSViewController {
             return nil
         }
 
-        let created = workspaceStore.addWorkspace(from: descriptor, tileSize: tileSize, at: index)
+        let normalizedTileSize = tileSize.map {
+            TileGeometry.normalizedSizeFromWidth(pixelSize: descriptor.pixelSize, targetWidth: $0.width)
+        }
+        let created = workspaceStore.addWorkspace(from: descriptor, tileSize: normalizedTileSize, at: index)
         scheduleDisplayStreamRefresh(immediate: true, force: true)
         scheduleArrangementSync()
         return created
     }
 
     @discardableResult
-    private func removeVirtualWorkspace(workspaceID: UUID) -> (workspace: Workspace, index: Int)? {
+    private func removeVirtualWorkspace(
+        workspaceID: UUID
+    ) -> (workspace: Workspace, index: Int, resolution: DisplayResolution?)? {
         guard let workspace = workspaceStore.workspace(with: workspaceID),
               workspace.kind == .virtual else {
             return nil
         }
+        let resolution = displayManager.virtualDisplayProfile(for: workspace.displayID).map(DisplayResolution.init)
         guard displayManager.removeVirtualDisplay(displayID: workspace.displayID) else {
             return nil
         }
@@ -1134,29 +1181,41 @@ final class WorkspaceRootViewController: NSViewController {
         }
         scheduleDisplayStreamRefresh(immediate: true, force: true)
         scheduleArrangementSync()
-        return removed
+        return (removed.workspace, removed.index, resolution)
     }
 
     private func registerUndoForCreate(workspaceID: UUID, actionName: String) {
         actionUndoManager.registerUndo(withTarget: self) { target in
             guard let removed = target.removeVirtualWorkspace(workspaceID: workspaceID) else { return }
-            target.registerUndoForDelete(removed: removed.workspace, index: removed.index, actionName: actionName)
+            target.registerUndoForDelete(
+                removed: removed.workspace,
+                index: removed.index,
+                resolution: removed.resolution,
+                actionName: actionName
+            )
             target.autoArrangeIfNeeded()
         }
         actionUndoManager.setActionName(actionName)
     }
 
-    private func registerUndoForDelete(removed: Workspace, index: Int, actionName: String) {
+    private func registerUndoForDelete(
+        removed: Workspace,
+        index: Int,
+        resolution: DisplayResolution?,
+        actionName: String
+    ) {
         let snapshot = DeletedWorkspaceSnapshot(
             title: removed.title,
             tileSize: removed.tileSize,
-            index: index
+            index: index,
+            resolution: resolution
         )
         actionUndoManager.registerUndo(withTarget: self) { target in
             guard let recreated = target.createVirtualWorkspace(
                 name: snapshot.title,
                 tileSize: snapshot.tileSize,
-                at: snapshot.index
+                at: snapshot.index,
+                resolution: snapshot.resolution
             ) else { return }
             target.registerUndoForCreate(workspaceID: recreated.id, actionName: actionName)
             target.autoArrangeIfNeeded()
@@ -1424,6 +1483,69 @@ final class WorkspaceRootViewController: NSViewController {
                 _ = self?.handleCanvasScrollEvent(event, requireUnfocusedWindow: true)
             }
         }
+    }
+
+    private func installMiddleDragMonitorsIfNeeded() {
+        let mask: NSEvent.EventTypeMask = [.otherMouseDown, .otherMouseDragged, .otherMouseUp]
+        if localMiddleDragMonitor == nil {
+            localMiddleDragMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
+                guard let self else { return event }
+                let consumed = self.handleMiddleDragEvent(event, requireUnfocusedWindow: false)
+                return consumed ? nil : event
+            }
+        }
+        guard globalMiddleDragMonitor == nil else { return }
+        globalMiddleDragMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
+            DispatchQueue.main.async {
+                _ = self?.handleMiddleDragEvent(event, requireUnfocusedWindow: true)
+            }
+        }
+    }
+
+    /// Middle-button drag pans the canvas, so navigating between tiles does not require
+    /// modifier + scroll. Only fires while the pointer is directly over the canvas window,
+    /// which is never the case once the pointer has been routed into a virtual display.
+    @discardableResult
+    private func handleMiddleDragEvent(_ event: NSEvent, requireUnfocusedWindow: Bool) -> Bool {
+        guard event.buttonNumber == 2 else { return false }
+
+        if event.type == .otherMouseUp {
+            guard isMiddleDragPanning else { return false }
+            endMiddleDragPan()
+            return true
+        }
+
+        guard currentLayoutMode == .canvas else { return false }
+        guard let window = view.window, window.isVisible else { return false }
+        if requireUnfocusedWindow, isOrcvWindowFocused() {
+            return false
+        }
+
+        if event.type == .otherMouseDown {
+            guard !workspaceStore.workspaces.isEmpty else { return false }
+            let mouseInScreen = NSEvent.mouseLocation
+            guard isPointerDirectlyOverWindow(window: window, screenPoint: mouseInScreen) else { return false }
+            let mouseInGrid = gridView.convert(window.convertPoint(fromScreen: mouseInScreen), from: nil)
+            guard gridView.bounds.contains(mouseInGrid) else { return false }
+            beginMiddleDragPan()
+            return true
+        }
+
+        guard isMiddleDragPanning else { return false }
+        _ = applyCanvasPan(deltaX: event.deltaX, deltaY: event.deltaY)
+        return true
+    }
+
+    private func beginMiddleDragPan() {
+        guard !isMiddleDragPanning else { return }
+        isMiddleDragPanning = true
+        NSCursor.closedHand.push()
+    }
+
+    private func endMiddleDragPan() {
+        guard isMiddleDragPanning else { return }
+        isMiddleDragPanning = false
+        NSCursor.pop()
     }
 
     @discardableResult
@@ -2897,6 +3019,7 @@ final class WorkspaceRootViewController: NSViewController {
         let entries = virtual.map { workspace in
             let canvasX = workspace.canvasOrigin.map { Double($0.x) }
             let canvasY = workspace.canvasOrigin.map { Double($0.y) }
+            let profile = displayManager.virtualDisplayProfile(for: workspace.displayID)
             return PersistedWorkspaceState.WorkspaceEntry(
                 title: workspace.title,
                 pixelWidth: max(1, Int(workspace.displayPixelSize.width.rounded())),
@@ -2905,7 +3028,10 @@ final class WorkspaceRootViewController: NSViewController {
                 tileHeight: workspace.tileSize.height,
                 displaySerial: displayManager.virtualDisplaySerial(for: workspace.displayID),
                 canvasX: canvasX,
-                canvasY: canvasY
+                canvasY: canvasY,
+                logicalWidth: profile?.width,
+                logicalHeight: profile?.height,
+                hiDPI: profile?.hiDPI
             )
         }
 
@@ -2930,6 +3056,9 @@ final class WorkspaceRootViewController: NSViewController {
             unlockFPSIfInteracting: unlockFPSIfInteractingEnabled,
             unlockFPSIfLargerThanPercent: unlockFPSIfLargerThanPercentEnabled,
             unlockFPSLargerThanPercentThreshold: unlockFPSLargerThanPercentThreshold,
+            defaultDisplayWidth: defaultDisplayResolution?.width,
+            defaultDisplayHeight: defaultDisplayResolution?.height,
+            defaultDisplayHiDPI: defaultDisplayResolution?.hiDPI,
             workspaces: entries
         )
     }
@@ -2948,6 +3077,7 @@ final class WorkspaceRootViewController: NSViewController {
         let unlockFPSIfInteracting: Bool
         let unlockFPSIfLargerThanPercent: Bool
         let unlockFPSLargerThanPercentThreshold: Double
+        let defaultDisplayResolution: DisplayResolution?
     }
 
     private func buildBootstrapState() -> BootstrapState {
@@ -2967,10 +3097,17 @@ final class WorkspaceRootViewController: NSViewController {
                 limitFPS: 60.0,
                 unlockFPSIfInteracting: true,
                 unlockFPSIfLargerThanPercent: false,
-                unlockFPSLargerThanPercentThreshold: 70.0
+                unlockFPSLargerThanPercentThreshold: 70.0,
+                defaultDisplayResolution: nil
             )
         }
-        let profile = displayManager.mainDisplayProfile()
+        let persistedDefaultResolution: DisplayResolution? = {
+            guard let w = persisted.defaultDisplayWidth, let h = persisted.defaultDisplayHeight else { return nil }
+            return DisplayResolution(width: w, height: h, hiDPI: persisted.defaultDisplayHiDPI ?? true)
+        }()
+        let fallbackProfile = persistedDefaultResolution.map {
+            displayManager.profile(width: $0.width, height: $0.height, hiDPI: $0.hiDPI)
+        } ?? displayManager.mainDisplayProfile()
 
         var restored: [Workspace] = []
         var restoredSerialByWorkspaceID: [UUID: UInt32] = [:]
@@ -2978,6 +3115,12 @@ final class WorkspaceRootViewController: NSViewController {
 
         for (index, entry) in persisted.workspaces.enumerated() {
             let title = entry.title.isEmpty ? "\(index + 1)" : entry.title
+            let profile: VirtualDisplayManager.DisplayProfile
+            if let w = entry.logicalWidth, let h = entry.logicalHeight {
+                profile = displayManager.profile(width: w, height: h, hiDPI: entry.hiDPI ?? true)
+            } else {
+                profile = fallbackProfile
+            }
             guard let descriptor = displayManager.createVirtualDisplay(
                 name: title,
                 width: profile.width,
@@ -3035,7 +3178,8 @@ final class WorkspaceRootViewController: NSViewController {
             unlockFPSIfLargerThanPercent: persisted.unlockFPSIfLargerThanPercent ?? false,
             unlockFPSLargerThanPercentThreshold: clampedFPSUnlockCoverageThreshold(
                 persisted.unlockFPSLargerThanPercentThreshold ?? 70.0
-            )
+            ),
+            defaultDisplayResolution: persistedDefaultResolution
         )
     }
 
@@ -3112,6 +3256,7 @@ final class WorkspaceRootViewController: NSViewController {
         unlockFPSIfInteractingEnabled = bootstrap.unlockFPSIfInteracting
         unlockFPSIfLargerThanPercentEnabled = bootstrap.unlockFPSIfLargerThanPercent
         unlockFPSLargerThanPercentThreshold = clampedFPSUnlockCoverageThreshold(bootstrap.unlockFPSLargerThanPercentThreshold)
+        defaultDisplayResolution = bootstrap.defaultDisplayResolution
         if requireHoldingMoveShortcutEnabled {
             setWindowFollowToggleActive(false)
         }
